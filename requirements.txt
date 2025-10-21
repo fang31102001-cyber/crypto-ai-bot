@@ -1,5 +1,7 @@
 python-telegram-bot[job-queue]==21.6
-ccxt
+ccxt==4.3.83
 pandas==2.2.2
 numpy==1.26.4
-requests
+requests==2.32.3
+pytz
+tzdata

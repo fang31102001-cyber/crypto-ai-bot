@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: worker
     name: crypto-ai-bot
     env: python
     pythonVersion: 3.11.9

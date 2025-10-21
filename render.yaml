@@ -2,7 +2,6 @@ services:
   - type: worker
     name: crypto-ai-bot
     env: python
-    runtime: python3
     plan: free
     buildCommand: |
       pip install --upgrade pip wheel setuptools

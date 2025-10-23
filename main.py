@@ -26,7 +26,7 @@ import pandas as pd
 import numpy as np
 
 def mexc_client():
-    return ccxt.mexc3({
+    return ccxt.mexc({
         "options": {"defaultType": "swap"},
         "enableRateLimit": True,
     })

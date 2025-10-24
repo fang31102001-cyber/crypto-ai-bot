@@ -355,3 +355,20 @@ if ai_memory:
     print("🧠 Trí nhớ AI trước đó:", ai_memory.get("learning", {}))
 else:
     print("🧠 Không có trí nhớ cũ — bắt đầu mới.")
+# ========== AUTO BACKUP TRÍ NHỚ AI MỖI 3 TIẾNG ==========
+import threading
+
+def auto_backup_loop(interval_hours=3):
+    """Tự động đồng bộ trí nhớ AI lên Drive định kỳ"""
+    def loop():
+        while True:
+            try:
+                sync_ai_memory_to_drive()
+                print(f"🕒 Tự động đồng bộ Drive hoàn tất ({datetime.now().strftime('%H:%M:%S')})")
+            except Exception as e:
+                print("⚠️ Lỗi auto backup:", e)
+            time.sleep(interval_hours * 3600)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
+auto_backup_loop(3)

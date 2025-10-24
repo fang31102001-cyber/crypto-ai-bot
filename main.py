@@ -250,10 +250,12 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # auto-scan mỗi 1 giờ
-    app.job_queue.run_repeating(auto_scan, interval=3600, first=10, data={"chat_id": 7992112548})
+    # chạy tự động đúng mỗi giờ (00 phút)
+    from datetime import time
+    for hour in range(24):
+        app.job_queue.run_daily(auto_scan, time=time(hour, 0), data={"chat_id": 7992112548})
 
-    print("🤖 Bot đang chạy và quét tự động mỗi 1 tiếng...")
+    print("🤖 Bot đang chạy và quét đúng mỗi giờ (00 phút)...")
     app.run_polling(allowed_updates=None)
 
 if __name__ == "__main__":

@@ -260,3 +260,55 @@ def main():
 
 if __name__ == "__main__":
     main()
+# ========== AI MEMORY SYNC (Google Drive) ==========
+import json
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+
+def sync_ai_memory_to_drive():
+    """Đồng bộ file AI_memory.json lên Google Drive"""
+    try:
+        creds = Credentials(
+            None,
+            refresh_token=os.getenv("GOOGLE_REFRESH_TOKEN"),
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=os.getenv("GOOGLE_CLIENT_ID"),
+            client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+            scopes=["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive.metadata.readonly"]
+        )
+        service = build('drive', 'v3', credentials=creds)
+
+        # Dữ liệu học ví dụ (sau này AI tự cập nhật)
+        data = {
+            "updated": datetime.utcnow().isoformat(),
+            "learning": {
+                "trend_model": "EMA+RSI+Volume",
+                "last_signal": "Short OP 15m",
+                "ai_score": "tăng độ chính xác"
+            }
+        }
+
+        # Ghi tạm vào file local
+        with open("AI_memory.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        # Upload lên Drive
+        from googleapiclient.http import MediaFileUpload
+        media = MediaFileUpload("AI_memory.json", mimetype="application/json")
+        response = service.files().list(q="name='AI_memory.json'", spaces='drive').execute()
+
+        if len(response.get('files', [])) > 0:
+            file_id = response['files'][0]['id']
+            service.files().update(fileId=file_id, media_body=media).execute()
+            print("✅ Đã cập nhật AI_memory.json lên Google Drive.")
+        else:
+            file_metadata = {'name': 'AI_memory.json'}
+            service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            print("✅ Đã tạo file AI_memory.json mới trên Google Drive.")
+    except Exception as e:
+        print("⚠️ Drive Sync Error:", e)
+
+
+# Gọi hàm sau khi bot khởi động
+sync_ai_memory_to_drive()

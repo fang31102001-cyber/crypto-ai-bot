@@ -312,3 +312,46 @@ def sync_ai_memory_to_drive():
 
 # Gọi hàm sau khi bot khởi động
 sync_ai_memory_to_drive()
+def load_ai_memory_from_drive():
+    """Tải lại dữ liệu AI_memory.json từ Google Drive khi bot khởi động"""
+    try:
+        creds = Credentials(
+            None,
+            refresh_token=os.getenv("GOOGLE_REFRESH_TOKEN"),
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=os.getenv("GOOGLE_CLIENT_ID"),
+            client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+            scopes=["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive.metadata.readonly"]
+        )
+        service = build('drive', 'v3', credentials=creds)
+
+        results = service.files().list(q="name='AI_memory.json'", spaces='drive').execute()
+        files = results.get('files', [])
+        if not files:
+            print("⚠️ Không tìm thấy file AI_memory.json trên Google Drive.")
+            return None
+
+        file_id = files[0]['id']
+        request = service.files().get_media(fileId=file_id)
+        import io
+        from googleapiclient.http import MediaIoBaseDownload
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        data = json.load(fh)
+        print("✅ Đã tải AI_memory.json từ Google Drive.")
+        return data
+    except Exception as e:
+        print("⚠️ Lỗi khi tải AI_memory.json:", e)
+        return None
+
+
+# Khi khởi động bot, gọi đọc file trí nhớ
+ai_memory = load_ai_memory_from_drive()
+if ai_memory:
+    print("🧠 Trí nhớ AI trước đó:", ai_memory.get("learning", {}))
+else:
+    print("🧠 Không có trí nhớ cũ — bắt đầu mới.")

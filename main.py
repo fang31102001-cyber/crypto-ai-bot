@@ -192,19 +192,20 @@ def auto_backup_loop():
 
 # ========== MAIN ==========
 def main():
-    from keep_alive import run_server
-    threading.Thread(target=run_server,daemon=True).start()
+    from keep_alive import keep_alive
+    keep_alive()  # giữ server luôn bật
 
-    app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",cmd_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,handle_text))
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    from datetime import time as t
-    for h in range(0,24,0):
-        app.job_queue.run_repeating(auto_scan,interval=1800,first=10,data={"chat_id":7992112548})
+    # quét tín hiệu mỗi 30 phút
+    app.job_queue.run_repeating(auto_scan, interval=1800, first=10, data={"chat_id": 5335165612})
+
     auto_backup_loop()
     print("Bot DeepFlow v2.7 đang chạy (quét mỗi 30 phút)...")
     app.run_polling(allowed_updates=None)
+
 
 if __name__=="__main__":
     main()

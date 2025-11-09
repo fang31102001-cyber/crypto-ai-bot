@@ -41,6 +41,19 @@ MEMO_PATH   = os.path.join(DATA_DIR, "memory.json")
 PENDING_PATH= os.path.join(DATA_DIR, "pending.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+# Tự tạo file memory.json nếu chưa tồn tại để tránh lỗi khi sync / khi AI load
+if not os.path.exists(MEMO_PATH):
+    with open(MEMO_PATH, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "w": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "lr": 0.03,
+                "memory": []
+            },
+            f,
+            indent=2
+        )
+
 # ================== KEEP ALIVE ==================
 def start_keep_alive():
     try:

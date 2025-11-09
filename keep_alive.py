@@ -1,22 +1,23 @@
-from flask import Flask
-from threading import Thread
+# keep_alive.py
+import os
 import logging
+from flask import Flask
 
-# Tắt toàn bộ log mặc định của Flask để tránh spam GET /
-log = logging.getLogger('werkzeug')
+# Tắt bớt log của Flask để không spam "GET /"
+log = logging.getLogger("werkzeug")
 log.setLevel(logging.ERROR)
 
-app = Flask('')
+app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
-    return "Bot AI DeepFlow v2.7 is alive."
+    return "Bot AI đang hoạt động."
 
-def run():
-    # Không in log ra console
-    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True
-    t.start()
+def run_server():
+    """
+    Hàm này sẽ được gọi từ main.py.
+    Render yêu cầu bind đúng PORT trong env, nếu không có thì dùng 10000.
+    """
+    port = int(os.environ.get("PORT", "10000"))
+    # debug=False, use_reloader=False để không tạo thêm process/threaad phụ
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)

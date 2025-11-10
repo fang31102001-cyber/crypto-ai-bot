@@ -271,16 +271,14 @@ def main():
     print("🤖 Bot đang chạy và quét đúng mỗi giờ (00 phút)...")
     app.run_polling(allowed_updates=None)
 
-if __name__ == "__main__":
-    main()
 # ========== AI MEMORY SYNC (Google Drive) ==========
-import json, threading, io
+import io, threading
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 def google_creds():
-    """Khởi tạo thông tin xác thực Google Drive"""
+    """Khởi tạo thông tin xác thực Google Drive từ ENV"""
     return Credentials(
         None,
         refresh_token=os.getenv("GOOGLE_REFRESH_TOKEN"),
@@ -294,27 +292,34 @@ def google_creds():
     )
 
 def sync_ai_memory_to_drive():
-    """Đồng bộ file AI_memory.json lên Google Drive"""
+    """
+    Đồng bộ TRÍ NHỚ THẬT của AI (data/memory.json - MEMO_PATH)
+    lên Google Drive dưới tên: AI_memory.json
+    """
     try:
+        if not os.path.exists(MEMO_PATH):
+            print("⚠️ Chưa có file MEMO_PATH, bỏ qua sync.")
+            return
+
+        # 1) Đọc trí nhớ AI hiện tại
+        with open(MEMO_PATH, "r", encoding="utf-8") as f:
+            memory_data = json.load(f)
+
+        # 2) Thêm timestamp để theo dõi (không ảnh hưởng mô hình)
+        memory_data["_last_synced_utc"] = datetime.now(timezone.utc).isoformat()
+
+        # 3) Ghi ra file tạm để upload
+        with open("AI_memory.json", "w", encoding="utf-8") as f:
+            json.dump(memory_data, f, indent=2, ensure_ascii=False)
+
+        # 4) Upload lên Drive
         creds = google_creds()
         service = build("drive", "v3", credentials=creds)
-
-        data = {
-            "updated": datetime.utcnow().isoformat(),
-            "learning": {
-                "trend_model": "EMA+RSI+Volume",
-                "last_signal": "Short OP 15m",
-                "ai_score": "tăng độ chính xác",
-            },
-        }
-
-        with open("AI_memory.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
 
         media = MediaFileUpload("AI_memory.json", mimetype="application/json")
         resp = service.files().list(q="name='AI_memory.json'", spaces="drive").execute()
 
-        if len(resp.get("files", [])) > 0:
+        if resp.get("files"):
             file_id = resp["files"][0]["id"]
             service.files().update(fileId=file_id, media_body=media).execute()
             print("✅ Đã cập nhật AI_memory.json lên Google Drive.")
@@ -326,14 +331,17 @@ def sync_ai_memory_to_drive():
         print("⚠️ Drive Sync Error:", e)
 
 def load_ai_memory_from_drive():
-    """Tải lại dữ liệu AI_memory.json từ Google Drive khi bot khởi động"""
+    """
+    Tải AI_memory.json từ Drive về,
+    ghi lại vào MEMO_PATH và nạp trọng số vào AI (nếu có).
+    """
     try:
         creds = google_creds()
         service = build("drive", "v3", credentials=creds)
         results = service.files().list(q="name='AI_memory.json'", spaces="drive").execute()
         files = results.get("files", [])
         if not files:
-            print("⚠️ Không tìm thấy file AI_memory.json trên Google Drive.")
+            print("⚠️ Không tìm thấy AI_memory.json trên Google Drive.")
             return None
 
         file_id = files[0]["id"]
@@ -345,6 +353,19 @@ def load_ai_memory_from_drive():
             status, done = downloader.next_chunk()
         fh.seek(0)
         data = json.load(fh)
+
+        # 1) Ghi lại vào MEMO_PATH để lần sau AI load từ local
+        with open(MEMO_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        # 2) Cập nhật trọng số AI đang chạy (nếu có key 'w')
+        try:
+            if "w" in data:
+                AI.w = np.array(data["w"], dtype=float)
+                print("🧠 Đã nạp lại trọng số AI từ Drive vào mô hình đang chạy.")
+        except Exception as e:
+            print("⚠️ Không thể nạp trọng số AI từ Drive:", e)
+
         print("✅ Đã tải AI_memory.json từ Google Drive.")
         return data
     except Exception as e:
@@ -352,7 +373,7 @@ def load_ai_memory_from_drive():
         return None
 
 def auto_backup_loop(interval_hours=3):
-    """Tự động đồng bộ trí nhớ AI lên Drive định kỳ"""
+    """Tự động đồng bộ trí nhớ AI lên Drive định kỳ."""
     def loop():
         while True:
             try:
@@ -364,13 +385,9 @@ def auto_backup_loop(interval_hours=3):
 
     threading.Thread(target=loop, daemon=True).start()
 
-# 🔹 Gọi song song khi bot chạy
-threading.Thread(target=sync_ai_memory_to_drive, daemon=True).start()
+# 🔹 Khởi động auto backup + (tùy chọn) nạp trí nhớ từ Drive khi start
 auto_backup_loop(3)
+load_ai_memory_from_drive()
 
-# ✅ Kiểm tra trí nhớ cũ nếu có
-ai_memory = load_ai_memory_from_drive()
-if ai_memory:
-    print("🧠 Trí nhớ AI trước đó:", ai_memory.get("learning", {}))
-else:
-    print("🧠 Không có trí nhớ cũ — bắt đầu mới.")
+if __name__ == "__main__":
+    main()

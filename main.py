@@ -1,5 +1,5 @@
 # main.py
-import os, math, json, time
+import os, math, json, time, random
 from threading import Thread
 from datetime import datetime, timezone, timedelta
 from typing import Tuple
@@ -8,6 +8,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.error import Conflict
 
 # ================== ENV & DEFAULTS ==================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -128,7 +129,6 @@ def fetch_ohlcv(base: str, tf: str, limit: int = 300) -> pd.DataFrame:
     try:
         data = EX.fetch_ohlcv(sym, timeframe=tf, limit=limit)
     except Exception:
-        # fallback format
         sym2 = f"{base.upper()}/{QUOTE}"
         data = EX.fetch_ohlcv(sym2, timeframe=tf, limit=limit)
 
@@ -404,6 +404,17 @@ def _seconds_to_next_hour(tz_name: str) -> int:
     delta = int((nxt - now).total_seconds())
     return max(10, delta)
 
+# -------- NEW: clean webhook/pending updates + error handler --------
+async def post_init(app):
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
+async def on_error(update, ctx):
+    err = ctx.error
+    if isinstance(err, Conflict):
+        print("⚠️ Conflict: có instance khác đang polling token này (thường do restart/deploy chồng nhau).")
+    else:
+        print("⚠️ Error:", repr(err))
+
 def main():
     start_keep_alive()
 
@@ -416,21 +427,38 @@ def main():
     else:
         print("ℹ️ Thiếu Google Drive ENV -> bỏ qua sync.")
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # -------- NEW: retry loop để không chết vì Conflict --------
+    while True:
+        try:
+            app = (
+                ApplicationBuilder()
+                .token(TELEGRAM_BOT_TOKEN)
+                .post_init(post_init)
+                .build()
+            )
 
-    if AUTO_SCAN:
-        first = _seconds_to_next_hour(TZ)
-        app.job_queue.run_repeating(
-            auto_scan,
-            interval=SCAN_INTERVAL_SEC,
-            first=first,
-            data={"chat_id": CHAT_ID},
-        )
+            app.add_handler(CommandHandler("start", cmd_start))
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+            app.add_error_handler(on_error)
 
-    print("🤖 Bot đang chạy...")
-    app.run_polling(allowed_updates=None)
+            if AUTO_SCAN:
+                first = _seconds_to_next_hour(TZ)
+                app.job_queue.run_repeating(
+                    auto_scan,
+                    interval=SCAN_INTERVAL_SEC,
+                    first=first,
+                    data={"chat_id": CHAT_ID},
+                )
+
+            print("🤖 Bot đang chạy...")
+            app.run_polling(drop_pending_updates=True, allowed_updates=None)
+            break
+
+        except Conflict:
+            wait = 15 + random.randint(0, 10)
+            print(f"⚠️ Conflict getUpdates -> đợi {wait}s rồi chạy lại...")
+            time.sleep(wait)
+            continue
 
 if __name__ == "__main__":
     main()

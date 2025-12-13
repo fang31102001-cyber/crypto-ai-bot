@@ -7,6 +7,6 @@ services:
       pip install --upgrade pip wheel setuptools
       pip install -r requirements.txt
     startCommand: |
-      python main.py
+      python -u main.py
     healthCheckPath: /
     autoDeploy: true

@@ -10,12 +10,12 @@ import numpy as np
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.error import Conflict
 
-# ================== LOGGING (triệt để để thấy bot có chạy không) ==================
+# ================== LOGGING ==================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger("bot")
 
 # ================== ENV & DEFAULTS ==================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -27,11 +27,9 @@ SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "3600"))
 ALERT_THRESHOLD    = int(os.getenv("ALERT_THRESHOLD", "80"))
 MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "2"))
 
-EXCHANGE           = os.getenv("EXCHANGE", "MEXC")
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
 QUOTE              = os.getenv("QUOTE", "USDT").upper()
 
-AUTO_LEARN_MARKET  = os.getenv("AUTO_LEARN_MARKET", "true").lower() == "true"
 LABEL_TP_PCT       = float(os.getenv("LABEL_TP_PCT", "0.004"))
 LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 
@@ -298,14 +296,15 @@ async def auto_scan(ctx):
                 )
                 await ctx.application.bot.send_message(chat_id=chat_id, text=msg)
         except Exception as e:
-            logging.getLogger("auto_scan").warning("scan fail %s: %r", coin, e)
-            continue
+            log.warning("scan fail %s: %r", coin, e)
 
-# ================== Drive Sync ==================
+# ================== Drive Sync (tự tắt nếu invalid_grant) ==================
 import io, threading
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+
+_drive_enabled = True  # sẽ tắt nếu invalid_grant
 
 def _has_drive_env() -> bool:
     return all([
@@ -327,13 +326,23 @@ def google_creds():
         ],
     )
 
+def _is_invalid_grant(err: Exception) -> bool:
+    s = repr(err).lower()
+    return "invalid_grant" in s or "bad request" in s
+
 def sync_ai_memory_to_drive():
+    global _drive_enabled
+    if not _drive_enabled:
+        return
     try:
         if not os.path.exists(MEMO_PATH):
             return
+
         with open(MEMO_PATH, "r", encoding="utf-8") as f:
             memory_data = json.load(f)
+
         memory_data["_last_synced_utc"] = datetime.now(timezone.utc).isoformat()
+
         with open("AI_memory.json", "w", encoding="utf-8") as f:
             json.dump(memory_data, f, indent=2, ensure_ascii=False)
 
@@ -349,10 +358,18 @@ def sync_ai_memory_to_drive():
         else:
             meta = {"name": "AI_memory.json"}
             service.files().create(body=meta, media_body=media, fields="id").execute()
+
     except Exception as e:
-        print("⚠️ Drive Sync Error:", repr(e), flush=True)
+        if _is_invalid_grant(e):
+            _drive_enabled = False
+            print("⛔ Google Drive invalid_grant -> TẮT sync Drive (cần cấp lại refresh token).", flush=True)
+        else:
+            print("⚠️ Drive Sync Error:", repr(e), flush=True)
 
 def load_ai_memory_from_drive():
+    global _drive_enabled
+    if not _drive_enabled:
+        return None
     try:
         creds = google_creds()
         service = build("drive", "v3", credentials=creds)
@@ -378,9 +395,15 @@ def load_ai_memory_from_drive():
         if "w" in data:
             AI.w = np.array(data["w"], dtype=float)
 
+        print("✅ Đã tải AI_memory.json từ Drive.", flush=True)
         return data
+
     except Exception as e:
-        print("⚠️ Lỗi khi tải AI_memory.json:", repr(e), flush=True)
+        if _is_invalid_grant(e):
+            _drive_enabled = False
+            print("⛔ Google Drive invalid_grant -> TẮT sync Drive (cần cấp lại refresh token).", flush=True)
+        else:
+            print("⚠️ Lỗi khi tải AI_memory.json:", repr(e), flush=True)
         return None
 
 def auto_backup_loop(interval_hours=3):
@@ -388,7 +411,8 @@ def auto_backup_loop(interval_hours=3):
         while True:
             try:
                 sync_ai_memory_to_drive()
-                print(f"🕒 Drive sync ({datetime.now().strftime('%H:%M:%S')})", flush=True)
+                if _drive_enabled:
+                    print(f"🕒 Drive sync ({datetime.now().strftime('%H:%M:%S')})", flush=True)
             except Exception as e:
                 print("⚠️ Lỗi auto backup:", repr(e), flush=True)
             time.sleep(interval_hours * 3600)
@@ -402,12 +426,13 @@ def _seconds_to_next_hour(tz_name: str) -> int:
         now = datetime.now(tz)
     except Exception:
         now = datetime.now()
+
     nxt = (now + timedelta(hours=1)).replace(minute=0, second=5, microsecond=0)
     delta = int((nxt - now).total_seconds())
     return max(10, delta)
 
-# --- NEW: dọn webhook + verify token ngay khi start ---
 async def post_init(app):
+    # dọn webhook/pending trước khi polling
     await app.bot.delete_webhook(drop_pending_updates=True)
     me = await app.bot.get_me()
     print(f"✅ Telegram OK: @{me.username} (id={me.id})", flush=True)
@@ -431,6 +456,7 @@ def main():
     else:
         print("ℹ️ Thiếu Google Drive ENV -> bỏ qua sync.", flush=True)
 
+    # retry loop để không chết vì Conflict (Render restart/deploy chồng)
     while True:
         try:
             app = (
@@ -458,7 +484,7 @@ def main():
             break
 
         except Conflict:
-            wait = 15 + random.randint(0, 10)
+            wait = 20 + random.randint(0, 20)
             print(f"⚠️ Conflict getUpdates -> đợi {wait}s rồi chạy lại...", flush=True)
             time.sleep(wait)
 

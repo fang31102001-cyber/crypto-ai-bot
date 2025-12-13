@@ -3,15 +3,15 @@ import os
 import logging
 from flask import Flask
 
-# Tắt bớt log của Flask để không spam "GET /"
+# Giảm log của werkzeug để không spam request
 log = logging.getLogger("werkzeug")
 log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
-@app.route("/")
+@app.get("/")
 def home():
-    return "Bot AI đang hoạt động."
+    return "Bot AI đang hoạt động.", 200
 
 def run_server():
     """
@@ -19,5 +19,7 @@ def run_server():
     Render yêu cầu bind đúng PORT trong env, nếu không có thì dùng 10000.
     """
     port = int(os.environ.get("PORT", "10000"))
-    # debug=False, use_reloader=False để không tạo thêm process/threaad phụ
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+    # threaded=True giúp xử lý ping ổn định hơn.
+    # use_reloader=False tránh tạo process phụ.
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)

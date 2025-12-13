@@ -1,5 +1,5 @@
 # main.py
-import os, math, json, time, random
+import os, math, json, time, random, logging
 from threading import Thread
 from datetime import datetime, timezone, timedelta
 from typing import Tuple
@@ -9,6 +9,13 @@ import pandas as pd
 import numpy as np
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.error import Conflict
+
+# ================== LOGGING (triệt để để thấy bot có chạy không) ==================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ================== ENV & DEFAULTS ==================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -45,8 +52,9 @@ def start_keep_alive():
     try:
         from keep_alive import run_server
         Thread(target=run_server, daemon=True).start()
-    except Exception:
-        pass
+        print("✅ keep_alive started", flush=True)
+    except Exception as e:
+        print("⚠️ keep_alive failed:", repr(e), flush=True)
 
 # ================== Helpers ==================
 VALID_TF = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","12h","1d"}
@@ -289,7 +297,8 @@ async def auto_scan(ctx):
                     f"Nến: {r['pattern']} | AI Score: {r['score']}%"
                 )
                 await ctx.application.bot.send_message(chat_id=chat_id, text=msg)
-        except Exception:
+        except Exception as e:
+            logging.getLogger("auto_scan").warning("scan fail %s: %r", coin, e)
             continue
 
 # ================== Drive Sync ==================
@@ -322,12 +331,9 @@ def sync_ai_memory_to_drive():
     try:
         if not os.path.exists(MEMO_PATH):
             return
-
         with open(MEMO_PATH, "r", encoding="utf-8") as f:
             memory_data = json.load(f)
-
         memory_data["_last_synced_utc"] = datetime.now(timezone.utc).isoformat()
-
         with open("AI_memory.json", "w", encoding="utf-8") as f:
             json.dump(memory_data, f, indent=2, ensure_ascii=False)
 
@@ -344,7 +350,7 @@ def sync_ai_memory_to_drive():
             meta = {"name": "AI_memory.json"}
             service.files().create(body=meta, media_body=media, fields="id").execute()
     except Exception as e:
-        print("⚠️ Drive Sync Error:", e)
+        print("⚠️ Drive Sync Error:", repr(e), flush=True)
 
 def load_ai_memory_from_drive():
     try:
@@ -369,15 +375,12 @@ def load_ai_memory_from_drive():
         with open(MEMO_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-        try:
-            if "w" in data:
-                AI.w = np.array(data["w"], dtype=float)
-        except Exception as e:
-            print("⚠️ Không thể nạp trọng số AI từ Drive:", e)
+        if "w" in data:
+            AI.w = np.array(data["w"], dtype=float)
 
         return data
     except Exception as e:
-        print("⚠️ Lỗi khi tải AI_memory.json:", e)
+        print("⚠️ Lỗi khi tải AI_memory.json:", repr(e), flush=True)
         return None
 
 def auto_backup_loop(interval_hours=3):
@@ -385,9 +388,9 @@ def auto_backup_loop(interval_hours=3):
         while True:
             try:
                 sync_ai_memory_to_drive()
-                print(f"🕒 Drive sync ({datetime.now().strftime('%H:%M:%S')})")
+                print(f"🕒 Drive sync ({datetime.now().strftime('%H:%M:%S')})", flush=True)
             except Exception as e:
-                print("⚠️ Lỗi auto backup:", e)
+                print("⚠️ Lỗi auto backup:", repr(e), flush=True)
             time.sleep(interval_hours * 3600)
     threading.Thread(target=loop, daemon=True).start()
 
@@ -399,21 +402,22 @@ def _seconds_to_next_hour(tz_name: str) -> int:
         now = datetime.now(tz)
     except Exception:
         now = datetime.now()
-
     nxt = (now + timedelta(hours=1)).replace(minute=0, second=5, microsecond=0)
     delta = int((nxt - now).total_seconds())
     return max(10, delta)
 
-# -------- NEW: clean webhook/pending updates + error handler --------
+# --- NEW: dọn webhook + verify token ngay khi start ---
 async def post_init(app):
     await app.bot.delete_webhook(drop_pending_updates=True)
+    me = await app.bot.get_me()
+    print(f"✅ Telegram OK: @{me.username} (id={me.id})", flush=True)
 
 async def on_error(update, ctx):
     err = ctx.error
     if isinstance(err, Conflict):
-        print("⚠️ Conflict: có instance khác đang polling token này (thường do restart/deploy chồng nhau).")
+        print("⚠️ Conflict: có instance khác đang polling token này.", flush=True)
     else:
-        print("⚠️ Error:", repr(err))
+        print("⚠️ Error:", repr(err), flush=True)
 
 def main():
     start_keep_alive()
@@ -425,9 +429,8 @@ def main():
         load_ai_memory_from_drive()
         auto_backup_loop(3)
     else:
-        print("ℹ️ Thiếu Google Drive ENV -> bỏ qua sync.")
+        print("ℹ️ Thiếu Google Drive ENV -> bỏ qua sync.", flush=True)
 
-    # -------- NEW: retry loop để không chết vì Conflict --------
     while True:
         try:
             app = (
@@ -450,15 +453,14 @@ def main():
                     data={"chat_id": CHAT_ID},
                 )
 
-            print("🤖 Bot đang chạy...")
+            print("🤖 Bot polling start...", flush=True)
             app.run_polling(drop_pending_updates=True, allowed_updates=None)
             break
 
         except Conflict:
             wait = 15 + random.randint(0, 10)
-            print(f"⚠️ Conflict getUpdates -> đợi {wait}s rồi chạy lại...")
+            print(f"⚠️ Conflict getUpdates -> đợi {wait}s rồi chạy lại...", flush=True)
             time.sleep(wait)
-            continue
 
 if __name__ == "__main__":
     main()

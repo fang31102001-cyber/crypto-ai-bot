@@ -1,67 +1,53 @@
-import os, math, asyncio, json, time
+# main.py
+import os, math, json, time
 from threading import Thread
-from datetime import datetime, timezone
-from typing import Tuple, Dict, Any, List
+from datetime import datetime, timezone, timedelta
+from typing import Tuple
 
 import ccxt
 import pandas as pd
 import numpy as np
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 
 # ================== ENV & DEFAULTS ==================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TZ                 = os.getenv("TZ", "Asia/Ho_Chi_Minh")
 TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 
-# Auto scan & filters
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
-SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "3600"))   # quét mỗi 1h
-ALERT_THRESHOLD    = int(os.getenv("ALERT_THRESHOLD", "80"))       # AI score min
+SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "3600"))
+ALERT_THRESHOLD    = int(os.getenv("ALERT_THRESHOLD", "80"))
 MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "2"))
-MIN_ATR_PCT        = float(os.getenv("MIN_ATR_PCT", "0.25"))
-FUNDING_MAX        = float(os.getenv("FUNDING_MAX", "0.02"))
-TF_ALIGN_REQ       = int(os.getenv("TF_ALIGN", "2"))
-TF_SET             = [x.strip() for x in os.getenv("TF_SET", "5m,15m,1h").split(",") if x.strip()]
-MAX_SIGNALS_PER_HR = int(os.getenv("MAX_SIGNALS_PER_HOUR", "5"))
 
-# Universe
 EXCHANGE           = os.getenv("EXCHANGE", "MEXC")
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
 QUOTE              = os.getenv("QUOTE", "USDT").upper()
-TOP_LIMIT          = int(os.getenv("TOP_LIMIT", "20"))
 
-# AI tự học thị trường (auto-label)
 AUTO_LEARN_MARKET  = os.getenv("AUTO_LEARN_MARKET", "true").lower() == "true"
 LABEL_TP_PCT       = float(os.getenv("LABEL_TP_PCT", "0.004"))
 LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 
-# Storage
-DATA_DIR    = "data"
-MEMO_PATH   = os.path.join(DATA_DIR, "memory.json")
-PENDING_PATH= os.path.join(DATA_DIR, "pending.json")
+CHAT_ID            = int(os.getenv("CHAT_ID", "7992112548"))
+
+DATA_DIR     = "data"
+MEMO_PATH    = os.path.join(DATA_DIR, "memory.json")
+PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Tự tạo file memory.json nếu chưa tồn tại để tránh lỗi khi sync / khi AI load
+# create memory.json if missing
 if not os.path.exists(MEMO_PATH):
     with open(MEMO_PATH, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "w": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                "lr": 0.03,
-                "memory": []
-            },
-            f,
-            indent=2
-        )
+        json.dump({"w": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "lr": 0.03, "memory": []}, f, indent=2)
 
 # ================== KEEP ALIVE ==================
 def start_keep_alive():
     try:
         from keep_alive import run_server
         Thread(target=run_server, daemon=True).start()
-    except:
+    except Exception:
         pass
-# ================== Helper & Indicators ==================
+
+# ================== Helpers ==================
 VALID_TF = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","12h","1d"}
 
 def parse_symbol_tf(text: str, default_tf: str) -> Tuple[str, str]:
@@ -80,136 +66,190 @@ def fmt(x, nd=6):
     except Exception:
         return str(x)
 
-# ================== CCXT MEXC (Futures/Swap) ==================
-def mexc_client():
-    return ccxt.mexc({
-        "options": {"defaultType": MARKET_TYPE},
-        "enableRateLimit": True,
-    })
+# ================== CCXT (MEXC Swap) ==================
+EX = ccxt.mexc({
+    "options": {"defaultType": MARKET_TYPE},
+    "enableRateLimit": True,
+})
 
 def symbol_usdt_perp(base: str) -> str:
     return f"{base.upper()}/{QUOTE}:{QUOTE}"
 
 # ================== Indicators ==================
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
+
 def rsi(close, n=14):
     d = close.diff()
     up, down = d.clip(lower=0), (-d).clip(lower=0)
     rs = up.rolling(n).mean() / (down.rolling(n).mean() + 1e-9)
     return 100 - (100 / (1 + rs))
+
 def macd(close, fast=12, slow=26, signal=9):
     f, s = ema(close, fast), ema(close, slow)
-    m = f - s; sig = ema(m, signal); h = m - sig
+    m = f - s
+    sig = ema(m, signal)
+    h = m - sig
     return m, sig, h
+
 def atr(df, n=14):
-    h,l,c = df["high"], df["low"], df["close"]
+    h, l, c = df["high"], df["low"], df["close"]
     pc = c.shift(1)
-    tr = pd.concat([(h-l),(h-pc).abs(),(l-pc).abs()],axis=1).max(axis=1)
+    tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
 # ================== Candlestick patterns ==================
-def detect_pattern(df):
+def detect_pattern(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    o,h,l,c = last["open"], last["high"], last["low"], last["close"]
-    op,cp = prev["open"], prev["close"]
+    o, h, l, c = float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"])
+    op, cp = float(prev["open"]), float(prev["close"])
+
+    rng = h - l
+    if rng <= 0:
+        return "-"
 
     body = abs(c - o)
-    wick = h - l
-    upwick = h - max(c,o)
-    lowwick = min(c,o) - l
 
-    if body < wick * 0.3 and c > o: return "Hammer 🟢"
-    if body < wick * 0.3 and c < o: return "Inverted Hammer 🔴"
-    if c > op and o < cp and (c - o) > body * 0.8: return "Bullish Engulfing 💚"
-    if c < op and o > cp and (o - c) > body * 0.8: return "Bearish Engulfing ❤️"
-    if abs(c - o) < body * 0.05: return "Doji ⚪"
+    if body < rng * 0.3 and c > o:
+        return "Hammer 🟢"
+    if body < rng * 0.3 and c < o:
+        return "Inverted Hammer 🔴"
+    if c > op and o < cp and (c - o) > rng * 0.5:
+        return "Bullish Engulfing 💚"
+    if c < op and o > cp and (o - c) > rng * 0.5:
+        return "Bearish Engulfing ❤️"
+    if body < rng * 0.05:
+        return "Doji ⚪"
     return "-"
 
-# ================== Enrich Data ==================
-def fetch_ohlcv(base, tf, limit=300):
-    ex = mexc_client()
+# ================== Data ==================
+def fetch_ohlcv(base: str, tf: str, limit: int = 300) -> pd.DataFrame:
     sym = symbol_usdt_perp(base)
-    data = ex.fetch_ohlcv(sym, timeframe=tf, limit=limit)
+    try:
+        data = EX.fetch_ohlcv(sym, timeframe=tf, limit=limit)
+    except Exception:
+        # fallback format
+        sym2 = f"{base.upper()}/{QUOTE}"
+        data = EX.fetch_ohlcv(sym2, timeframe=tf, limit=limit)
+
     df = pd.DataFrame(data, columns=["ts","open","high","low","close","volume"])
     df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
     return df
 
-def enrich(df):
+def enrich(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
-    d["ema12"] = ema(d["close"],12)
-    d["ema26"] = ema(d["close"],26)
-    m,s,h = macd(d["close"]); d["macd"],d["macd_sig"],d["macd_hist"] = m,s,h
+    d["ema12"] = ema(d["close"], 12)
+    d["ema26"] = ema(d["close"], 26)
+    m, s, h = macd(d["close"])
+    d["macd"], d["macd_sig"], d["macd_hist"] = m, s, h
     d["rsi"] = rsi(d["close"])
     d["atr"] = atr(d)
+
     v = d["volume"]
     d["vol_z"] = (v - v.rolling(50).mean()) / (v.rolling(50).std() + 1e-9)
-    d["pattern"] = d.apply(lambda row: "-", axis=1)
+
+    d["pattern"] = "-"
     if len(d) > 2:
         d.loc[d.index[-1], "pattern"] = detect_pattern(d)
-    return d.dropna()
+
+    d = d.dropna()
+    if len(d) < 5:
+        raise ValueError("Không đủ dữ liệu để phân tích.")
+    return d
 
 # ================== Online AI ==================
 class OnlineAI:
-    def __init__(self, path):
+    def __init__(self, path: str):
         self.path = path
         self.w = np.zeros(6, dtype=float)
         self.lr = 0.03
         self._load()
+
     def _load(self):
         if os.path.exists(self.path):
             try:
-                obj = json.load(open(self.path, "r"))
+                with open(self.path, "r", encoding="utf-8") as f:
+                    obj = json.load(f)
                 self.w = np.array(obj.get("w", self.w.tolist()), dtype=float)
                 self.lr = float(obj.get("lr", self.lr))
-            except: pass
+            except Exception:
+                pass
+
     def _save(self):
-        json.dump({"w": self.w.tolist(),"lr":self.lr}, open(self.path,"w"))
-    def _feat(self, row):
-        trend = (row["ema12"] - row["ema26"]) / (abs(row["ema26"])+1e-9)
-        macd_h = row["macd_hist"]; rsi_c = (row["rsi"]-50)/50.0
-        volz = np.tanh(row["vol_z"]/3.0); atrp = row["atr"]/max(row["close"],1e-9)
+        obj = {}
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    obj = json.load(f)
+            except Exception:
+                obj = {}
+        obj["w"] = self.w.tolist()
+        obj["lr"] = float(self.lr)
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+
+    def _feat(self, row: dict) -> np.ndarray:
+        trend = (row["ema12"] - row["ema26"]) / (abs(row["ema26"]) + 1e-9)
+        macd_h = float(row["macd_hist"])
+        rsi_c = (float(row["rsi"]) - 50.0) / 50.0
+        volz = float(np.tanh(float(row["vol_z"]) / 3.0))
+        atrp = float(row["atr"]) / max(float(row["close"]), 1e-9)
         bias = 1.0
-        return np.array([trend,macd_h,rsi_c,volz,atrp,bias])
-    def score(self,row):
-        x=self._feat(row); z=float(np.dot(self.w,x)); p=1/(1+math.exp(-z))
-        return int(round(p*100))
-    def learn(self,row,label:int):
-        x=self._feat(row); z=float(np.dot(self.w,x)); p=1/(1+math.exp(-z))
-        grad=(p-label)*x; self.w-=self.lr*grad; self._save()
+        return np.array([trend, macd_h, rsi_c, volz, atrp, bias], dtype=float)
+
+    def _sigmoid(self, z: float) -> float:
+        if z >= 0:
+            ez = math.exp(-z)
+            return 1.0 / (1.0 + ez)
+        ez = math.exp(z)
+        return ez / (1.0 + ez)
+
+    def score(self, row: dict) -> int:
+        x = self._feat(row)
+        z = float(np.dot(self.w, x))
+        p = self._sigmoid(z)
+        return int(round(p * 100))
+
+    def learn(self, row: dict, label: int):
+        x = self._feat(row)
+        z = float(np.dot(self.w, x))
+        p = self._sigmoid(z)
+        grad = (p - label) * x
+        self.w -= self.lr * grad
+        self._save()
 
 AI = OnlineAI(MEMO_PATH)
-# ================== PHÂN TÍCH & HỌC ==================
-def make_targets(entry, atrv, side):
+
+# ================== Analysis ==================
+def make_targets(entry: float, atrv: float, side: str):
     tp1 = entry + (1.5 * atrv if side == "LONG" else -1.5 * atrv)
     tp2 = entry + (2.5 * atrv if side == "LONG" else -2.5 * atrv)
     sl  = entry - (1.0 * atrv if side == "LONG" else -1.0 * atrv)
     return tp1, tp2, sl
 
-def analyze(base, tf):
+def analyze(base: str, tf: str) -> dict:
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
+
     side = "LONG" if (row["ema12"] > row["ema26"] and row["macd_hist"] > 0 and row["rsi"] > 48) else "SHORT"
     score = AI.score(row)
-    tp1,tp2,sl = make_targets(row["close"], row["atr"], side)
-    pattern = row.get("pattern","-")
+    tp1, tp2, sl = make_targets(float(row["close"]), float(row["atr"]), side)
+    pattern = row.get("pattern", "-")
 
     return {
-        "base": base.upper(), "tf": tf, "side": side, "price": row["close"],
-        "tp1": tp1, "tp2": tp2, "sl": sl, "score": score,
-        "ema12": row["ema12"], "ema26": row["ema26"], "rsi": row["rsi"],
-        "macd_hist": row["macd_hist"], "vol_z": row["vol_z"], "atr": row["atr"],
+        "base": base.upper(), "tf": tf, "side": side, "price": float(row["close"]),
+        "tp1": float(tp1), "tp2": float(tp2), "sl": float(sl), "score": int(score),
+        "ema12": float(row["ema12"]), "ema26": float(row["ema26"]), "rsi": float(row["rsi"]),
+        "macd_hist": float(row["macd_hist"]), "vol_z": float(row["vol_z"]), "atr": float(row["atr"]),
         "pattern": pattern
     }
 
-# ================== TELEGRAM BOT ==================
+# ================== Telegram ==================
 async def cmd_start(update, ctx):
     await update.message.reply_text(
         "🤖 Bot AI Futures đã sẵn sàng!\n"
-        "• Gõ coin: `btc` hoặc `sol 15m`\n"
-        "• Bot tự động gửi tín hiệu mỗi 1h khi có sóng mạnh 📈📉\n"
-        "• AI học từ thị trường thực tế, phân tích mô hình nến, dòng tiền, RSI, MACD, Volume\n"
-        "• Khi có tín hiệu mạnh: Bot gửi ngay"
+        "• Gõ coin: btc hoặc sol 15m\n"
+        "• Bot tự động gửi tín hiệu mỗi 1h khi có sóng mạnh\n"
     )
 
 async def handle_text(update, ctx):
@@ -231,14 +271,14 @@ async def handle_text(update, ctx):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Lỗi phân tích: {e}")
 
-# ================== TỰ ĐỘNG GỬI TÍN HIỆU MẠNH ==================
+# ================== Auto scan ==================
 async def auto_scan(ctx):
-    chat_id = ctx.job.data["chat_id"]
+    chat_id = int(ctx.job.data["chat_id"])
     top = ["BTC","ETH","SOL","WLD","XRP","TON","ARB","LINK","PEPE","SUI"]
     for coin in top:
         try:
             r = analyze(coin, TIMEFRAME_DEFAULT)
-            if r["score"] >= 80 and r["vol_z"] > 2:
+            if r["score"] >= ALERT_THRESHOLD and r["vol_z"] > MIN_VOLZ:
                 msg = (
                     f"🔥 Tín hiệu mạnh — {r['base']}/USDT ({r['tf']})\n"
                     f"Hướng: {r['side']} | Giá: {fmt(r['price'])}\n"
@@ -252,33 +292,20 @@ async def auto_scan(ctx):
         except Exception:
             continue
 
-# ================== KHỞI CHẠY BOT ==================
-def main():
-    start_keep_alive()
-
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("Thiếu TELEGRAM_BOT_TOKEN trong Environment Variables.")
-
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    # chạy tự động đúng mỗi giờ (00 phút)
-    from datetime import time
-    for hour in range(24):
-        app.job_queue.run_daily(auto_scan, time=time(hour, 0), data={"chat_id": 7992112548})
-
-    print("🤖 Bot đang chạy và quét đúng mỗi giờ (00 phút)...")
-    app.run_polling(allowed_updates=None)
-
-# ========== AI MEMORY SYNC (Google Drive) ==========
+# ================== Drive Sync ==================
 import io, threading
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
+def _has_drive_env() -> bool:
+    return all([
+        os.getenv("GOOGLE_REFRESH_TOKEN"),
+        os.getenv("GOOGLE_CLIENT_ID"),
+        os.getenv("GOOGLE_CLIENT_SECRET"),
+    ])
+
 def google_creds():
-    """Khởi tạo thông tin xác thực Google Drive từ ENV"""
     return Credentials(
         None,
         refresh_token=os.getenv("GOOGLE_REFRESH_TOKEN"),
@@ -292,27 +319,18 @@ def google_creds():
     )
 
 def sync_ai_memory_to_drive():
-    """
-    Đồng bộ TRÍ NHỚ THẬT của AI (data/memory.json - MEMO_PATH)
-    lên Google Drive dưới tên: AI_memory.json
-    """
     try:
         if not os.path.exists(MEMO_PATH):
-            print("⚠️ Chưa có file MEMO_PATH, bỏ qua sync.")
             return
 
-        # 1) Đọc trí nhớ AI hiện tại
         with open(MEMO_PATH, "r", encoding="utf-8") as f:
             memory_data = json.load(f)
 
-        # 2) Thêm timestamp để theo dõi (không ảnh hưởng mô hình)
         memory_data["_last_synced_utc"] = datetime.now(timezone.utc).isoformat()
 
-        # 3) Ghi ra file tạm để upload
         with open("AI_memory.json", "w", encoding="utf-8") as f:
             json.dump(memory_data, f, indent=2, ensure_ascii=False)
 
-        # 4) Upload lên Drive
         creds = google_creds()
         service = build("drive", "v3", credentials=creds)
 
@@ -322,26 +340,19 @@ def sync_ai_memory_to_drive():
         if resp.get("files"):
             file_id = resp["files"][0]["id"]
             service.files().update(fileId=file_id, media_body=media).execute()
-            print("✅ Đã cập nhật AI_memory.json lên Google Drive.")
         else:
             meta = {"name": "AI_memory.json"}
             service.files().create(body=meta, media_body=media, fields="id").execute()
-            print("✅ Đã tạo file AI_memory.json mới trên Google Drive.")
     except Exception as e:
         print("⚠️ Drive Sync Error:", e)
 
 def load_ai_memory_from_drive():
-    """
-    Tải AI_memory.json từ Drive về,
-    ghi lại vào MEMO_PATH và nạp trọng số vào AI (nếu có).
-    """
     try:
         creds = google_creds()
         service = build("drive", "v3", credentials=creds)
         results = service.files().list(q="name='AI_memory.json'", spaces="drive").execute()
         files = results.get("files", [])
         if not files:
-            print("⚠️ Không tìm thấy AI_memory.json trên Google Drive.")
             return None
 
         file_id = files[0]["id"]
@@ -350,44 +361,76 @@ def load_ai_memory_from_drive():
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
-            status, done = downloader.next_chunk()
+            _, done = downloader.next_chunk()
+
         fh.seek(0)
         data = json.load(fh)
 
-        # 1) Ghi lại vào MEMO_PATH để lần sau AI load từ local
         with open(MEMO_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-        # 2) Cập nhật trọng số AI đang chạy (nếu có key 'w')
         try:
             if "w" in data:
                 AI.w = np.array(data["w"], dtype=float)
-                print("🧠 Đã nạp lại trọng số AI từ Drive vào mô hình đang chạy.")
         except Exception as e:
             print("⚠️ Không thể nạp trọng số AI từ Drive:", e)
 
-        print("✅ Đã tải AI_memory.json từ Google Drive.")
         return data
     except Exception as e:
         print("⚠️ Lỗi khi tải AI_memory.json:", e)
         return None
 
 def auto_backup_loop(interval_hours=3):
-    """Tự động đồng bộ trí nhớ AI lên Drive định kỳ."""
     def loop():
         while True:
             try:
                 sync_ai_memory_to_drive()
-                print(f"🕒 Tự động đồng bộ Drive hoàn tất ({datetime.now().strftime('%H:%M:%S')})")
+                print(f"🕒 Drive sync ({datetime.now().strftime('%H:%M:%S')})")
             except Exception as e:
                 print("⚠️ Lỗi auto backup:", e)
             time.sleep(interval_hours * 3600)
-
     threading.Thread(target=loop, daemon=True).start()
 
-# 🔹 Khởi động auto backup + (tùy chọn) nạp trí nhớ từ Drive khi start
-auto_backup_loop(3)
-load_ai_memory_from_drive()
+# ================== Run ==================
+def _seconds_to_next_hour(tz_name: str) -> int:
+    try:
+        import pytz
+        tz = pytz.timezone(tz_name)
+        now = datetime.now(tz)
+    except Exception:
+        now = datetime.now()
+
+    nxt = (now + timedelta(hours=1)).replace(minute=0, second=5, microsecond=0)
+    delta = int((nxt - now).total_seconds())
+    return max(10, delta)
+
+def main():
+    start_keep_alive()
+
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("Thiếu TELEGRAM_BOT_TOKEN trong Environment Variables.")
+
+    if _has_drive_env():
+        load_ai_memory_from_drive()
+        auto_backup_loop(3)
+    else:
+        print("ℹ️ Thiếu Google Drive ENV -> bỏ qua sync.")
+
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    if AUTO_SCAN:
+        first = _seconds_to_next_hour(TZ)
+        app.job_queue.run_repeating(
+            auto_scan,
+            interval=SCAN_INTERVAL_SEC,
+            first=first,
+            data={"chat_id": CHAT_ID},
+        )
+
+    print("🤖 Bot đang chạy...")
+    app.run_polling(allowed_updates=None)
 
 if __name__ == "__main__":
     main()

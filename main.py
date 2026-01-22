@@ -40,6 +40,11 @@ MEMO_PATH    = os.path.join(DATA_DIR, "memory.json")
 PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+TRADES_PATH = os.path.join(DATA_DIR, "trades.json")
+if not os.path.exists(TRADES_PATH):
+    with open(TRADES_PATH, "w", encoding="utf-8") as f:
+        json.dump([], f)
+
 # create memory.json if missing
 if not os.path.exists(MEMO_PATH):
     with open(MEMO_PATH, "w", encoding="utf-8") as f:
@@ -103,6 +108,22 @@ def atr(df, n=14):
     pc = c.shift(1)
     tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
+
+# ================== Market Structure ==================
+def detect_bos(df: pd.DataFrame, lookback: int = 20) -> str:
+    high = df["high"]
+    low = df["low"]
+
+    swing_high = high.rolling(lookback).max()
+    swing_low = low.rolling(lookback).min()
+
+    last_close = df["close"].iloc[-1]
+
+    if last_close > swing_high.iloc[-2]:
+        return "BOS_UP"
+    if last_close < swing_low.iloc[-2]:
+        return "BOS_DOWN"
+    return "NO_BOS"
 
 # ================== Candlestick patterns ==================
 def detect_pattern(df: pd.DataFrame) -> str:
@@ -237,18 +258,101 @@ def analyze(base: str, tf: str) -> dict:
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
 
-    side = "LONG" if (row["ema12"] > row["ema26"] and row["macd_hist"] > 0 and row["rsi"] > 48) else "SHORT"
+    # 1. Market structure
+    bos = detect_bos(df)
+    if bos == "NO_BOS":
+        return {"skip": True, "reason": "No BOS"}
+
+    # 2. Volume xác nhận
+    if abs(row["vol_z"]) < MIN_VOLZ:
+        return {"skip": True, "reason": "Weak volume"}
+
+    side = "LONG" if bos == "BOS_UP" else "SHORT"
     score = AI.score(row)
-    tp1, tp2, sl = make_targets(float(row["close"]), float(row["atr"]), side)
-    pattern = row.get("pattern", "-")
+
+    # 3. TP / SL theo ATR
+    entry = float(row["close"])
+    atrv = float(row["atr"])
+    tp = entry + (2.0 * atrv if side == "LONG" else -2.0 * atrv)
+    sl = entry - (1.0 * atrv if side == "LONG" else -1.0 * atrv)
+
+    # 4. Lưu trade để theo dõi WIN / LOSE
+    trade = {
+        "time": datetime.utcnow().isoformat(),
+        "base": base,
+        "tf": tf,
+        "side": side,
+        "entry": entry,
+        "tp": tp,
+        "sl": sl,
+        "features": AI._feat(row).tolist(),
+        "status": "OPEN"
+    }
+
+    with open(TRADES_PATH, "r+", encoding="utf-8") as f:
+        trades = json.load(f)
+        trades.append(trade)
+        f.seek(0)
+        json.dump(trades, f, indent=2)
 
     return {
-        "base": base.upper(), "tf": tf, "side": side, "price": float(row["close"]),
-        "tp1": float(tp1), "tp2": float(tp2), "sl": float(sl), "score": int(score),
-        "ema12": float(row["ema12"]), "ema26": float(row["ema26"]), "rsi": float(row["rsi"]),
-        "macd_hist": float(row["macd_hist"]), "vol_z": float(row["vol_z"]), "atr": float(row["atr"]),
-        "pattern": pattern
+        "base": base.upper(),
+        "tf": tf,
+        "side": side,
+        "price": entry,
+        "tp": tp,
+        "sl": sl,
+        "score": score,
+        "bos": bos
     }
+def update_trades_and_learn():
+    with open(TRADES_PATH, "r+", encoding="utf-8") as f:
+        trades = json.load(f)
+
+    changed = False
+
+    for t in trades:
+        if t["status"] != "OPEN":
+            continue
+
+        df = fetch_ohlcv(t["base"], t["tf"], limit=5)
+        high = df["high"].iloc[-1]
+        low = df["low"].iloc[-1]
+
+        row = {
+            "ema12": 1.0 + t["features"][0],
+            "ema26": 1.0,
+            "macd_hist": t["features"][1],
+            "rsi": 50.0 + t["features"][2] * 50.0,
+            "vol_z": t["features"][3],
+            "atr": max(t["features"][4], 1e-6),
+            "close": 1.0
+        }
+
+
+        if t["side"] == "LONG":
+            if high >= t["tp"]:
+                t["status"] = "WIN"
+                AI.learn(row, 1)
+                changed = True
+            elif low <= t["sl"]:
+                t["status"] = "LOSE"
+                AI.learn(row, 0)
+                changed = True
+
+        if t["side"] == "SHORT":
+            if low <= t["tp"]:
+                t["status"] = "WIN"
+                AI.learn(row, 1)
+                changed = True
+            elif high >= t["sl"]:
+                t["status"] = "LOSE"
+                AI.learn(row, 0)
+                changed = True
+
+    if changed:
+        with open(TRADES_PATH, "w", encoding="utf-8") as f:
+            json.dump(trades, f, indent=2)
 
 # ================== Telegram ==================
 async def cmd_start(update, ctx):
@@ -261,40 +365,54 @@ async def cmd_start(update, ctx):
 async def handle_text(update, ctx):
     text = (update.message.text or "").strip()
     try:
+        update_trades_and_learn()
         base, tf = parse_symbol_tf(text, TIMEFRAME_DEFAULT)
         r = analyze(base, tf)
+
+        if r.get("skip"):
+            await update.message.reply_text(f"⏭️ Bỏ qua: {r['reason']}")
+            return
+
         msg = (
-            f"📊 {r['base']} ({r['tf']}) — {r['side']}\n"
+            f"📊 {r['base']} ({r['tf']})\n"
+            f"Hướng: {r['side']} | BOS: {r['bos']}\n"
             f"Entry: {fmt(r['price'])}\n"
-            f"TP1: {fmt(r['tp1'])} | TP2: {fmt(r['tp2'])} | SL: {fmt(r['sl'])}\n"
-            f"RSI: {fmt(r['rsi'],2)} | MACD_hist: {fmt(r['macd_hist'],5)}\n"
-            f"EMA12/26: {fmt(r['ema12'])}/{fmt(r['ema26'])}\n"
-            f"VolZ: {fmt(r['vol_z'],2)} | ATR: {fmt(r['atr'],4)}\n"
-            f"Mô hình nến: {r['pattern']}\n"
+            f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
             f"AI Score: {r['score']}%"
         )
         await update.message.reply_text(msg)
+
     except Exception as e:
         await update.message.reply_text(f"⚠️ Lỗi phân tích: {e}")
+
 
 # ================== Auto scan ==================
 async def auto_scan(ctx):
     chat_id = int(ctx.job.data["chat_id"])
+    update_trades_and_learn()
     top = ["BTC","ETH","SOL","WLD","XRP","TON","ARB","LINK","PEPE","SUI"]
+
     for coin in top:
         try:
             r = analyze(coin, TIMEFRAME_DEFAULT)
-            if r["score"] >= ALERT_THRESHOLD and r["vol_z"] > MIN_VOLZ:
+
+            if r.get("skip"):
+                continue
+
+            if r["score"] >= ALERT_THRESHOLD:
                 msg = (
                     f"🔥 Tín hiệu mạnh — {r['base']}/USDT ({r['tf']})\n"
-                    f"Hướng: {r['side']} | Giá: {fmt(r['price'])}\n"
-                    f"TP1/TP2: {fmt(r['tp1'])}/{fmt(r['tp2'])} | SL: {fmt(r['sl'])}\n"
-                    f"RSI: {fmt(r['rsi'],2)} | MACD_hist: {fmt(r['macd_hist'],5)}\n"
-                    f"EMA12/26: {fmt(r['ema12'])}/{fmt(r['ema26'])}\n"
-                    f"VolZ: {fmt(r['vol_z'],2)} | ATR: {fmt(r['atr'],5)}\n"
-                    f"Nến: {r['pattern']} | AI Score: {r['score']}%"
+                    f"Hướng: {r['side']} | BOS: {r['bos']}\n"
+                    f"Entry: {fmt(r['price'])}\n"
+                    f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
+                    f"AI Score: {r['score']}%"
                 )
-                await ctx.application.bot.send_message(chat_id=chat_id, text=msg)
+
+                await ctx.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=msg
+                )
+
         except Exception as e:
             log.warning("scan fail %s: %r", coin, e)
 

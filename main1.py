@@ -320,14 +320,14 @@ def update_trades_and_learn():
         low = df["low"].iloc[-1]
 
         row = {
-    "ema12": 1.0 + t["features"][0],
-    "ema26": 1.0,
-    "macd_hist": t["features"][1],
-    "rsi": 50.0 + t["features"][2] * 50.0,
-    "vol_z": t["features"][3],
-    "atr": max(t["features"][4], 1e-6),
-    "close": 1.0
-}
+            "ema12": 1.0 + t["features"][0],
+            "ema26": 1.0,
+            "macd_hist": t["features"][1],
+            "rsi": 50.0 + t["features"][2] * 50.0,
+            "vol_z": t["features"][3],
+            "atr": max(t["features"][4], 1e-6),
+            "close": 1.0
+        }
 
 
         if t["side"] == "LONG":
@@ -366,7 +366,7 @@ async def handle_text(update, ctx):
     text = (update.message.text or "").strip()
     try:
         update_trades_and_learn()
-                base, tf = parse_symbol_tf(text, TIMEFRAME_DEFAULT)
+        base, tf = parse_symbol_tf(text, TIMEFRAME_DEFAULT)
         r = analyze(base, tf)
 
         if r.get("skip"):
@@ -385,12 +385,14 @@ async def handle_text(update, ctx):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Lỗi phân tích: {e}")
 
+
 # ================== Auto scan ==================
 async def auto_scan(ctx):
     chat_id = int(ctx.job.data["chat_id"])
     update_trades_and_learn()
     top = ["BTC","ETH","SOL","WLD","XRP","TON","ARB","LINK","PEPE","SUI"]
-            for coin in top:
+
+    for coin in top:
         try:
             r = analyze(coin, TIMEFRAME_DEFAULT)
 
@@ -406,7 +408,10 @@ async def auto_scan(ctx):
                     f"AI Score: {r['score']}%"
                 )
 
-                await ctx.application.bot.send_message(chat_id=chat_id, text=msg)
+                await ctx.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=msg
+                )
 
         except Exception as e:
             log.warning("scan fail %s: %r", coin, e)

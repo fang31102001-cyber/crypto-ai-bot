@@ -88,7 +88,35 @@ def symbol_usdt_perp(base: str) -> str:
     return f"{base.upper()}/{QUOTE}:{QUOTE}"
 
 # ================== Indicators ==================
-def ema(s, n): return s.ewm(span=n, adjust=False).mean()
+def ema(s, n): 
+    return s.ewm(span=n, adjust=False).mean()
+    
+def get_htf_trend(base: str) -> str:
+    """
+    Xác định xu hướng khung 1H để lọc trade 15m
+    UP    -> chỉ được LONG
+    DOWN  -> chỉ được SHORT
+    SIDE  -> bỏ qua
+    """
+    df_htf = fetch_ohlcv(base, "1h", limit=300)
+
+    # EMA50 & EMA200 chuẩn
+    df_htf["ema50"] = ema(df_htf["close"], 50)
+    df_htf["ema200"] = ema(df_htf["close"], 200)
+
+    df_htf = df_htf.dropna()
+    if len(df_htf) < 5:
+        return "SIDE"
+
+    ema50 = df_htf["ema50"].iloc[-1]
+    ema200 = df_htf["ema200"].iloc[-1]
+
+    if ema50 > ema200:
+        return "UP"
+    elif ema50 < ema200:
+        return "DOWN"
+    else:
+        return "SIDE"
 
 def rsi(close, n=14):
     d = close.diff()
@@ -124,6 +152,59 @@ def detect_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     if last_close < swing_low.iloc[-2]:
         return "BOS_DOWN"
     return "NO_BOS"
+def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
+    """
+    BOS mạnh cho futures:
+    - Close phá swing
+    - Body nến lớn (>=60%)
+    - Volume tăng
+    """
+    if len(df) < lookback + 2:
+        return "NO_BOS"
+
+    high = df["high"]
+    low = df["low"]
+
+    swing_high = high.rolling(lookback).max()
+    swing_low = low.rolling(lookback).min()
+
+    last = df.iloc[-1]
+
+    o = last["open"]
+    h = last["high"]
+    l = last["low"]
+    c = last["close"]
+
+    body = abs(c - o)
+    range_ = h - l
+    if range_ == 0:
+        return "NO_BOS"
+
+    body_ratio = body / range_
+
+    vol = last["volume"]
+    vol_ma = df["volume"].rolling(20).mean().iloc[-2]
+
+    # BOS UP
+    if (
+        c > swing_high.iloc[-2] and
+        body_ratio >= 0.6 and
+        vol > vol_ma and
+        c > o
+    ):
+        return "BOS_UP"
+
+    # BOS DOWN
+    if (
+        c < swing_low.iloc[-2] and
+        body_ratio >= 0.6 and
+        vol > vol_ma and
+        c < o
+    ):
+        return "BOS_DOWN"
+
+    return "NO_BOS"
+
 
 # ================== Candlestick patterns ==================
 def detect_pattern(df: pd.DataFrame) -> str:
@@ -257,19 +338,34 @@ def make_targets(entry: float, atrv: float, side: str):
 def analyze(base: str, tf: str) -> dict:
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
+    
+    #  HTF trend filter (1H)
+    htf_trend = get_htf_trend(base)
+    if htf_trend == "SIDE":
+        return {"skip": True, "reason": "HTF sideways"}
 
-    # 1. Market structure
-    bos = detect_bos(df)
+    # ===== STRONG BOS (15m) =====
+    bos = detect_strong_bos(df)
     if bos == "NO_BOS":
-        return {"skip": True, "reason": "No BOS"}
+        return {"skip": True, "reason": "Weak / fake BOS"}
 
-    # 2. Volume xác nhận
+     # Xác định hướng trade
+    side = "LONG" if bos == "BOS_UP" else "SHORT"
+    
+    # ===== HTF DIRECTION LOCK =====
+    if htf_trend == "UP" and side != "LONG":
+        return {"skip": True, "reason": "HTF UP only LONG"}
+
+    if htf_trend == "DOWN" and side != "SHORT":
+        return {"skip": True, "reason": "HTF DOWN only SHORT"}
+
+    # ===== VOLUME CONFIRM =====
     if abs(row["vol_z"]) < MIN_VOLZ:
         return {"skip": True, "reason": "Weak volume"}
 
-    side = "LONG" if bos == "BOS_UP" else "SHORT"
+    # ===== AI SCORE =====
     score = AI.score(row)
-
+    
     # 3. TP / SL theo ATR
     entry = float(row["close"])
     atrv = float(row["atr"])

@@ -373,7 +373,7 @@ def analyze(base: str, tf: str) -> dict:
     if bos == "NO_BOS":
         return {"skip": True, "reason": "Weak / fake BOS"}
 
-     # Xác định hướng trade
+    # Xác định hướng trade
     side = "LONG" if bos == "BOS_UP" else "SHORT"
     
     # ===== HTF DIRECTION LOCK =====

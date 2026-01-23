@@ -77,6 +77,26 @@ def fmt(x, nd=6):
         return f"{float(x):.{nd}f}"
     except Exception:
         return str(x)
+        
+def in_trading_hours(
+    start_hour: int = 8,
+    end_hour: int = 22,
+    tz_name: str = "Asia/Ho_Chi_Minh"
+) -> bool:
+    """
+    Kiểm tra có đang trong giờ trade hay không
+    Mặc định: 08:00 -> 22:00 giờ VN
+    """
+    try:
+        import pytz
+        tz = pytz.timezone(tz_name)
+        now = datetime.now(tz)
+    except Exception:
+        now = datetime.now()
+
+    hour = now.hour
+    return start_hour <= hour < end_hour
+
 
 # ================== CCXT (MEXC Swap) ==================
 EX = ccxt.mexc({
@@ -336,6 +356,10 @@ def make_targets(entry: float, atrv: float, side: str):
     return tp1, tp2, sl
 
 def analyze(base: str, tf: str) -> dict:
+    # ===== TIME FILTER (08h-22h VN) =====
+    if not in_trading_hours(8, 22, TZ):
+        return {"skip": True, "reason": "Out of trading hours (08-22)"}
+        
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
     
@@ -484,6 +508,9 @@ async def handle_text(update, ctx):
 
 # ================== Auto scan ==================
 async def auto_scan(ctx):
+    # ===== TIME FILTER (08h-22h VN) =====
+    if not in_trading_hours(8, 22, TZ):
+        return
     chat_id = int(ctx.job.data["chat_id"])
     update_trades_and_learn()
     top = ["BTC","ETH","SOL","WLD","XRP","TON","ARB","LINK","PEPE","SUI"]

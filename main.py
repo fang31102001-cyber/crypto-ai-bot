@@ -61,6 +61,16 @@ def start_keep_alive():
 
 # ================== Helpers ==================
 VALID_TF = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","12h","1d"}
+def in_trading_hours(start=8, end=22, tz_name="Asia/Ho_Chi_Minh"):
+    try:
+        import pytz
+        tz = pytz.timezone(tz_name)
+        now = datetime.now(tz)
+    except:
+        now = datetime.now()
+
+    hour = now.hour
+    return start <= hour < end
 
 def parse_symbol_tf(text: str, default_tf: str) -> Tuple[str, str]:
     parts = (text or "").strip().lower().split()
@@ -109,6 +119,58 @@ def atr(df, n=14):
     tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
+def get_htf_trend(base: str) -> str:
+    df = fetch_ohlcv(base, "1h", limit=200)
+    df["ema50"] = ema(df["close"], 50)
+    df["ema200"] = ema(df["close"], 200)
+    df = df.dropna()
+
+    if len(df) < 5:
+        return "SIDE"
+
+    if df["ema50"].iloc[-1] > df["ema200"].iloc[-1]:
+        return "UP"
+    elif df["ema50"].iloc[-1] < df["ema200"].iloc[-1]:
+        return "DOWN"
+    else:
+        return "SIDE"
+
+def pullback_ok(row: dict, side: str, tolerance: float = 0.003) -> bool:
+    """
+    Kiểm tra giá có hồi về EMA50 hay chưa
+    tolerance = 0.003  ~ 0.3%
+    """
+    price = row["close"]
+    ema50 = row["ema50"]
+
+    if side == "LONG":
+        return price >= ema50 and abs(price - ema50) / ema50 <= tolerance
+
+    if side == "SHORT":
+        return price <= ema50 and abs(price - ema50) / ema50 <= tolerance
+
+    return False
+    
+def buy_sell_pressure(df: pd.DataFrame, lookback: int = 20):
+    """
+    Tính áp lực mua / bán dựa trên volume nến xanh & đỏ
+    Trả về: buy_ratio, sell_ratio (0 → 1)
+    """
+    recent = df.tail(lookback)
+
+    buy_vol = 0.0
+    sell_vol = 0.0
+
+    for _, r in recent.iterrows():
+        if r["close"] > r["open"]:
+            buy_vol += r["volume"]
+        else:
+            sell_vol += r["volume"]
+
+    total = buy_vol + sell_vol + 1e-9
+    return buy_vol / total, sell_vol / total
+
+
 # ================== Market Structure ==================
 def detect_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     high = df["high"]
@@ -124,6 +186,50 @@ def detect_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     if last_close < swing_low.iloc[-2]:
         return "BOS_DOWN"
     return "NO_BOS"
+def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
+    high = df["high"]
+    low = df["low"]
+
+    swing_high = high.rolling(lookback).max()
+    swing_low = low.rolling(lookback).min()
+
+    last = df.iloc[-1]
+
+    o = last["open"]
+    h = last["high"]
+    l = last["low"]
+    c = last["close"]
+
+    body = abs(c - o)
+    rng = h - l
+    if rng == 0:
+        return "NO_BOS"
+
+    body_ratio = body / rng
+
+    vol = last["volume"]
+    vol_ma = df["volume"].rolling(20).mean().iloc[-2]
+
+    # ===== BOS UP (NẾN XANH) =====
+    if (
+        c > swing_high.iloc[-2]
+        and c > o
+        and body_ratio >= 0.6
+        and vol > vol_ma
+    ):
+        return "BOS_UP"
+
+    # ===== BOS DOWN (NẾN ĐỎ) =====
+    if (
+        c < swing_low.iloc[-2]
+        and c < o
+        and body_ratio >= 0.6
+        and vol > vol_ma
+    ):
+        return "BOS_DOWN"
+
+    return "NO_BOS"
+
 
 # ================== Candlestick patterns ==================
 def detect_pattern(df: pd.DataFrame) -> str:
@@ -167,6 +273,7 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     d["ema12"] = ema(d["close"], 12)
     d["ema26"] = ema(d["close"], 26)
+    d["ema50"] = ema(d["close"], 50)
     m, s, h = macd(d["close"])
     d["macd"], d["macd_sig"], d["macd_hist"] = m, s, h
     d["rsi"] = rsi(d["close"])
@@ -255,28 +362,66 @@ def make_targets(entry: float, atrv: float, side: str):
     return tp1, tp2, sl
 
 def analyze(base: str, tf: str) -> dict:
+    if not in_trading_hours():
+        return {"skip": True, "reason": "Out of trading hours"}
+
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
 
-    # 1. Market structure
-    bos = detect_bos(df)
-    if bos == "NO_BOS":
-        return {"skip": True, "reason": "No BOS"}
+    htf = get_htf_trend(base)
+    if htf == "SIDE":
+        return {"skip": True, "reason": "HTF sideways"}
 
-    # 2. Volume xác nhận
+    bos = detect_strong_bos(df)
+    if bos == "NO_BOS":
+        return {"skip": True, "reason": "No strong BOS"}
+
+    side = "LONG" if bos == "BOS_UP" else "SHORT"
+
+    if htf == "UP" and side != "LONG":
+        return {"skip": True, "reason": "HTF UP only LONG"}
+
+    if htf == "DOWN" and side != "SHORT":
+        return {"skip": True, "reason": "HTF DOWN only SHORT"}
+
+    buy_ratio, sell_ratio = buy_sell_pressure(df)
+
+    if side == "LONG" and buy_ratio < 0.6:
+        return {"skip": True, "reason": "Weak buy pressure"}
+
+    if side == "SHORT" and sell_ratio < 0.6:
+        return {"skip": True, "reason": "Weak sell pressure"}
+# ===== RSI FILTER =====
+    rsi_val = float(row["rsi"])
+
+    if side == "LONG" and not (45 <= rsi_val <= 65):
+        return {"skip": True, "reason": f"RSI not good for LONG ({rsi_val:.1f})"}
+
+    if side == "SHORT" and not (35 <= rsi_val <= 55):
+        return {"skip": True, "reason": f"RSI not good for SHORT ({rsi_val:.1f})"}
+# ===== ENTRY CANDLE CONFIRM =====
+    pattern = row["pattern"]
+
+    if side == "LONG" and pattern not in ["Bullish Engulfing 💚", "Hammer 🟢"]:
+        return {"skip": True, "reason": f"No bullish candle ({pattern})"}
+
+    if side == "SHORT" and pattern not in ["Bearish Engulfing ❤️", "Inverted Hammer 🔴"]:
+        return {"skip": True, "reason": f"No bearish candle ({pattern})"}
+
+
+    if not pullback_ok(row, side):
+        return {"skip": True, "reason": "No pullback EMA50"}
+
     if abs(row["vol_z"]) < MIN_VOLZ:
         return {"skip": True, "reason": "Weak volume"}
 
-    side = "LONG" if bos == "BOS_UP" else "SHORT"
     score = AI.score(row)
 
-    # 3. TP / SL theo ATR
     entry = float(row["close"])
     atrv = float(row["atr"])
-    tp = entry + (2.0 * atrv if side == "LONG" else -2.0 * atrv)
-    sl = entry - (1.0 * atrv if side == "LONG" else -1.0 * atrv)
+    tp = entry + (2 * atrv if side == "LONG" else -2 * atrv)
+    sl = entry - (1 * atrv if side == "LONG" else -1 * atrv)
 
-    # 4. Lưu trade để theo dõi WIN / LOSE
     trade = {
         "time": datetime.utcnow().isoformat(),
         "base": base,
@@ -285,6 +430,7 @@ def analyze(base: str, tf: str) -> dict:
         "entry": entry,
         "tp": tp,
         "sl": sl,
+        "trailing_sl": sl,
         "features": AI._feat(row).tolist(),
         "status": "OPEN"
     }
@@ -296,15 +442,19 @@ def analyze(base: str, tf: str) -> dict:
         json.dump(trades, f, indent=2)
 
     return {
-        "base": base.upper(),
-        "tf": tf,
-        "side": side,
-        "price": entry,
-        "tp": tp,
-        "sl": sl,
-        "score": score,
-        "bos": bos
-    }
+    "base": base.upper(),
+    "tf": tf,
+    "side": side,
+    "price": entry,
+    "tp": tp,
+    "sl": sl,
+    "score": score,
+    "bos": bos,
+    "buy_ratio": round(buy_ratio * 100, 1),
+    "sell_ratio": round(sell_ratio * 100, 1),
+    "pattern": pattern,
+}
+
 def update_trades_and_learn():
     with open(TRADES_PATH, "r+", encoding="utf-8") as f:
         trades = json.load(f)
@@ -318,6 +468,9 @@ def update_trades_and_learn():
         df = fetch_ohlcv(t["base"], t["tf"], limit=5)
         high = df["high"].iloc[-1]
         low = df["low"].iloc[-1]
+        price = df["close"].iloc[-1]
+        atr_trail = t["features"][4] * 2   # 2 ATR
+
 
         row = {
             "ema12": 1.0 + t["features"][0],
@@ -329,26 +482,41 @@ def update_trades_and_learn():
             "close": 1.0
         }
 
+     # ===== TRAILING STOP LOGIC =====
 
-        if t["side"] == "LONG":
-            if high >= t["tp"]:
-                t["status"] = "WIN"
-                AI.learn(row, 1)
-                changed = True
-            elif low <= t["sl"]:
-                t["status"] = "LOSE"
-                AI.learn(row, 0)
-                changed = True
+    if t["side"] == "LONG":
 
-        if t["side"] == "SHORT":
-            if low <= t["tp"]:
-                t["status"] = "WIN"
-                AI.learn(row, 1)
-                changed = True
-            elif high >= t["sl"]:
-                t["status"] = "LOSE"
-                AI.learn(row, 0)
-                changed = True
+        new_sl = price - atr_trail
+        if new_sl > t["trailing_sl"]:
+            t["trailing_sl"] = new_sl
+
+        if low <= t["trailing_sl"]:
+            t["status"] = "WIN"
+            AI.learn(row, 1)
+             changed = True
+
+        elif high >= t["tp"]:
+            t["status"] = "WIN"
+            AI.learn(row, 1)
+            changed = True
+
+
+    if t["side"] == "SHORT":
+
+        new_sl = price + atr_trail
+        if new_sl < t["trailing_sl"]:
+            t["trailing_sl"] = new_sl
+
+        if high >= t["trailing_sl"]:
+            t["status"] = "WIN"
+            AI.learn(row, 1)
+            changed = True
+
+        elif low <= t["tp"]:
+            t["status"] = "WIN"
+            AI.learn(row, 1)
+            changed = True
+
 
     if changed:
         with open(TRADES_PATH, "w", encoding="utf-8") as f:
@@ -376,10 +544,13 @@ async def handle_text(update, ctx):
         msg = (
             f"📊 {r['base']} ({r['tf']})\n"
             f"Hướng: {r['side']} | BOS: {r['bos']}\n"
+            f"Candle: {r['pattern']}\n"
             f"Entry: {fmt(r['price'])}\n"
             f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-            f"AI Score: {r['score']}%"
+            f"AI Score: {r['score']}%\n"
+            f"Buy: {r['buy_ratio']}% | Sell: {r['sell_ratio']}%"
         )
+
         await update.message.reply_text(msg)
 
     except Exception as e:
@@ -405,7 +576,8 @@ async def auto_scan(ctx):
                     f"Hướng: {r['side']} | BOS: {r['bos']}\n"
                     f"Entry: {fmt(r['price'])}\n"
                     f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-                    f"AI Score: {r['score']}%"
+                    f"AI Score: {r['score']}%\n"
+                    f"Buy: {r['buy_ratio']}% | Sell: {r['sell_ratio']}%"
                 )
 
                 await ctx.application.bot.send_message(

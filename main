@@ -36,7 +36,7 @@ LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 
 CHAT_ID            = int(os.getenv("CHAT_ID", "7992112548"))
 
-DATA_DIR = "/data"
+DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 MEMO_PATH    = os.path.join(DATA_DIR, "memory.json")
@@ -257,6 +257,40 @@ def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
 
     return "NO_BOS"
 
+def detect_liquidity_sweep(df: pd.DataFrame, lookback: int = 20) -> str:
+    """
+    Phát hiện quét thanh khoản:
+    SWEEP_UP   -> quét đỉnh
+    SWEEP_DOWN -> quét đáy
+    NO_SWEEP
+    """
+
+    if len(df) < lookback + 5:
+        return "NO_SWEEP"
+
+    high = df["high"]
+    low = df["low"]
+
+    swing_high = high.rolling(lookback).max()
+    swing_low = low.rolling(lookback).min()
+
+    prev_high = swing_high.iloc[-3]
+    prev_low = swing_low.iloc[-3]
+
+    last_high = high.iloc[-2]
+    last_low = low.iloc[-2]
+    last_close = df["close"].iloc[-1]
+
+    # Sweep đáy rồi bật lên
+    if last_low < prev_low and last_close > prev_low:
+        return "SWEEP_DOWN"
+
+    # Sweep đỉnh rồi rơi xuống
+    if last_high > prev_high and last_close < prev_high:
+        return "SWEEP_UP"
+
+    return "NO_SWEEP"
+
 
 # ================== Candlestick patterns ==================
 def detect_pattern(df: pd.DataFrame) -> str:
@@ -423,6 +457,14 @@ def analyze(base: str, tf: str) -> dict:
     # ===== BREAK & RETEST =====
     if not break_retest_ok(df, side):
         return {"skip": True, "reason": "No break & retest"}
+    # ===== LIQUIDITY SWEEP FILTER =====
+    sweep = detect_liquidity_sweep(df)
+
+    if side == "LONG" and sweep != "SWEEP_DOWN":
+        return {"skip": True, "reason": "No liquidity sweep down"}
+
+    if side == "SHORT" and sweep != "SWEEP_UP":
+        return {"skip": True, "reason": "No liquidity sweep up"}
 
 
     # ===== HTF DIRECTION LOCK =====

@@ -7,6 +7,7 @@ from typing import Tuple
 import ccxt
 import pandas as pd
 import numpy as np
+import pytz
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.error import Conflict
 
@@ -36,6 +37,8 @@ LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 CHAT_ID            = int(os.getenv("CHAT_ID", "7992112548"))
 
 DATA_DIR     = "data"
+LAST_SIGNAL_TIME = {}
+COOLDOWN_MINUTES = 60
 MEMO_PATH    = os.path.join(DATA_DIR, "memory.json")
 PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -77,6 +80,12 @@ def fmt(x, nd=6):
         return f"{float(x):.{nd}f}"
     except Exception:
         return str(x)
+def cooldown_ok(symbol: str, side: str) -> bool:
+    key = f"{symbol}_{side}"
+    now = time.time()
+    last = LAST_SIGNAL_TIME.get(key, 0)
+    return (now - last) > COOLDOWN_MINUTES * 60
+
         
 def in_trading_hours(
     start_hour: int = 8,
@@ -172,6 +181,26 @@ def detect_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     if last_close < swing_low.iloc[-2]:
         return "BOS_DOWN"
     return "NO_BOS"
+
+def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float = 0.002) -> bool:
+    high = df["high"]
+    low = df["low"]
+
+    swing_high = high.rolling(lookback).max()
+    swing_low = low.rolling(lookback).min()
+
+    last_close = df["close"].iloc[-1]
+
+    if side == "LONG":
+        level = swing_high.iloc[-2]
+        return abs(last_close - level) / level <= tol
+
+    if side == "SHORT":
+        level = swing_low.iloc[-2]
+        return abs(last_close - level) / level <= tol
+
+    return False
+
 def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     """
     BOS mạnh cho futures:
@@ -266,10 +295,13 @@ def fetch_ohlcv(base: str, tf: str, limit: int = 300) -> pd.DataFrame:
 
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
+
     d["ema12"] = ema(d["close"], 12)
     d["ema26"] = ema(d["close"], 26)
+
     m, s, h = macd(d["close"])
     d["macd"], d["macd_sig"], d["macd_hist"] = m, s, h
+
     d["rsi"] = rsi(d["close"])
     d["atr"] = atr(d)
 
@@ -362,6 +394,11 @@ def analyze(base: str, tf: str) -> dict:
         
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
+    # ===== ATR FILTER =====
+    atr_ratio = row["atr"] / row["close"]
+
+    if atr_ratio < 0.002:
+        return {"skip": True, "reason": "ATR too low"}
     
     #  HTF trend filter (1H)
     htf_trend = get_htf_trend(base)
@@ -375,7 +412,16 @@ def analyze(base: str, tf: str) -> dict:
 
     # Xác định hướng trade
     side = "LONG" if bos == "BOS_UP" else "SHORT"
-    
+
+    # ===== COOLDOWN =====
+    if not cooldown_ok(base, side):
+        return {"skip": True, "reason": "Cooldown"}
+
+    # ===== BREAK & RETEST =====
+    if not break_retest_ok(df, side):
+        return {"skip": True, "reason": "No break & retest"}
+
+
     # ===== HTF DIRECTION LOCK =====
     if htf_trend == "UP" and side != "LONG":
         return {"skip": True, "reason": "HTF UP only LONG"}
@@ -386,6 +432,15 @@ def analyze(base: str, tf: str) -> dict:
     # ===== VOLUME CONFIRM =====
     if abs(row["vol_z"]) < MIN_VOLZ:
         return {"skip": True, "reason": "Weak volume"}
+    # ===== RSI FILTER =====
+    rsi_val = row["rsi"]
+
+    if side == "LONG" and not (45 <= rsi_val <= 65):
+        return {"skip": True, "reason": "RSI not good LONG"}
+
+    if side == "SHORT" and not (35 <= rsi_val <= 55):
+        return {"skip": True, "reason": "RSI not good SHORT"}
+
 
     # ===== AI SCORE =====
     score = AI.score(row)
@@ -414,6 +469,7 @@ def analyze(base: str, tf: str) -> dict:
         trades.append(trade)
         f.seek(0)
         json.dump(trades, f, indent=2)
+    LAST_SIGNAL_TIME[f"{base}_{side}"] = time.time()
 
     return {
         "base": base.upper(),

@@ -39,21 +39,22 @@ CHAT_ID            = int(os.getenv("CHAT_ID", "7992112548"))
 DATA_DIR = "/data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-LAST_SIGNAL_TIME = {}
-COOLDOWN_MINUTES = 60
-
 MEMO_PATH    = os.path.join(DATA_DIR, "memory.json")
 PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
 TRADES_PATH  = os.path.join(DATA_DIR, "trades.json")
+
+if not os.path.exists(MEMO_PATH):
+    with open(MEMO_PATH, "w", encoding="utf-8") as f:
+        json.dump({"w":[0,0,0,0,0,0], "lr":0.03}, f)
 
 if not os.path.exists(TRADES_PATH):
     with open(TRADES_PATH, "w", encoding="utf-8") as f:
         json.dump([], f)
 
-# create memory.json if missing
-if not os.path.exists(MEMO_PATH):
-    with open(MEMO_PATH, "w", encoding="utf-8") as f:
-        json.dump({"w": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "lr": 0.03, "memory": []}, f, indent=2)
+if not os.path.exists(PENDING_PATH):
+    with open(PENDING_PATH, "w", encoding="utf-8") as f:
+        json.dump({}, f)
+
 
 # ================== KEEP ALIVE ==================
 def start_keep_alive():

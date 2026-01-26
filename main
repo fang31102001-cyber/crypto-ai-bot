@@ -36,14 +36,16 @@ LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 
 CHAT_ID            = int(os.getenv("CHAT_ID", "7992112548"))
 
-DATA_DIR     = "data"
-LAST_SIGNAL_TIME = {}
-COOLDOWN_MINUTES = 60
-MEMO_PATH    = os.path.join(DATA_DIR, "memory.json")
-PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
+DATA_DIR = "/data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-TRADES_PATH = os.path.join(DATA_DIR, "trades.json")
+LAST_SIGNAL_TIME = {}
+COOLDOWN_MINUTES = 60
+
+MEMO_PATH    = os.path.join(DATA_DIR, "memory.json")
+PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
+TRADES_PATH  = os.path.join(DATA_DIR, "trades.json")
+
 if not os.path.exists(TRADES_PATH):
     with open(TRADES_PATH, "w", encoding="utf-8") as f:
         json.dump([], f)
@@ -743,6 +745,8 @@ async def on_error(update, ctx):
 
 def main():
     start_keep_alive()
+
+    print("AUTO_SCAN =", AUTO_SCAN)
 
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Thiếu TELEGRAM_BOT_TOKEN trong Environment Variables.")

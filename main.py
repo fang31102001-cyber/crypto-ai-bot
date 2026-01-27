@@ -40,6 +40,7 @@ DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 TRADES_PATH  = os.path.join(DATA_DIR, "trades.json")
+PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
 
 if not os.path.exists(TRADES_PATH):
     with open(TRADES_PATH, "w", encoding="utf-8") as f:
@@ -285,6 +286,19 @@ def detect_liquidity_sweep(df: pd.DataFrame, lookback: int = 20) -> str:
 
     return "NO_SWEEP"
 
+def ema_pullback_ok(row: dict, side: str, tol: float = 0.003) -> bool:
+    price = row["close"]
+    ema50 = row["ema50"]
+
+    if side == "LONG":
+        return price >= ema50 and abs(price - ema50) / ema50 <= tol
+
+    if side == "SHORT":
+        return price <= ema50 and abs(price - ema50) / ema50 <= tol
+
+    return False
+
+
 
 # ================== Candlestick patterns ==================
 def detect_pattern(df: pd.DataFrame) -> str:
@@ -329,6 +343,7 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
 
     d["ema12"] = ema(d["close"], 12)
     d["ema26"] = ema(d["close"], 26)
+    d["ema50"] = ema(d["close"], 50)
 
     m, s, h = macd(d["close"])
     d["macd"], d["macd_sig"], d["macd_hist"] = m, s, h
@@ -411,6 +426,10 @@ def analyze(base: str, tf: str) -> dict:
 
     if side == "SHORT" and not (35 <= rsi_val <= 55):
         return {"skip": True, "reason": "RSI not good SHORT"}
+    # ===== EMA50 PULLBACK =====
+    if not ema_pullback_ok(row, side):
+        return {"skip": True, "reason": "No EMA50 pullback"}
+
     
     # 3. TP / SL theo ATR
     entry = float(row["close"])

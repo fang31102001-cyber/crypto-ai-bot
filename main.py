@@ -413,10 +413,10 @@ def analyze(base: str, tf: str) -> dict:
     rsi_val = row["rsi"]
 
     if side == "LONG" and rsi_val > 70:
-    return {"skip": True, "reason": "RSI overbought"}
+        return {"skip": True, "reason": "RSI overbought"}
 
-if side == "SHORT" and rsi_val < 30:
-    return {"skip": True, "reason": "RSI oversold"}
+    if side == "SHORT" and rsi_val < 30:
+        return {"skip": True, "reason": "RSI oversold"}
     # ===== EMA50 PULLBACK =====
     if not ema_pullback_ok(row, side):
         return {"skip": True, "reason": "No EMA50 pullback"}

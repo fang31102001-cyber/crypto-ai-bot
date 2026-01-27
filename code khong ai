@@ -41,10 +41,6 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 TRADES_PATH  = os.path.join(DATA_DIR, "trades.json")
 
-if not os.path.exists(MEMO_PATH):
-    with open(MEMO_PATH, "w", encoding="utf-8") as f:
-        json.dump({"w":[0,0,0,0,0,0], "lr":0.03}, f)
-
 if not os.path.exists(TRADES_PATH):
     with open(TRADES_PATH, "w", encoding="utf-8") as f:
         json.dump([], f)
@@ -431,7 +427,6 @@ def analyze(base: str, tf: str) -> dict:
         "entry": entry,
         "tp": tp,
         "sl": sl,
-        "features": AI._feat(row).tolist(),
         "status": "OPEN"
     }
 
@@ -465,35 +460,20 @@ def update_trades_and_learn():
         high = df["high"].iloc[-1]
         low = df["low"].iloc[-1]
 
-        row = {
-            "ema12": 1.0 + t["features"][0],
-            "ema26": 1.0,
-            "macd_hist": t["features"][1],
-            "rsi": 50.0 + t["features"][2] * 50.0,
-            "vol_z": t["features"][3],
-            "atr": max(t["features"][4], 1e-6),
-            "close": 1.0
-        }
-
-
         if t["side"] == "LONG":
             if high >= t["tp"]:
                 t["status"] = "WIN"
-                AI.learn(row, 1)
                 changed = True
             elif low <= t["sl"]:
                 t["status"] = "LOSE"
-                AI.learn(row, 0)
                 changed = True
 
         if t["side"] == "SHORT":
             if low <= t["tp"]:
                 t["status"] = "WIN"
-                AI.learn(row, 1)
                 changed = True
             elif high >= t["sl"]:
                 t["status"] = "LOSE"
-                AI.learn(row, 0)
                 changed = True
 
     if changed:
@@ -547,13 +527,12 @@ async def auto_scan(ctx):
             if r.get("skip"):
                 continue
 
-            if r["score"] >= ALERT_THRESHOLD:
+            if not r.get("skip"):
                 msg = (
                     f"🔥 Tín hiệu mạnh — {r['base']}/USDT ({r['tf']})\n"
                     f"Hướng: {r['side']} | BOS: {r['bos']}\n"
                     f"Entry: {fmt(r['price'])}\n"
                     f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-                    f"AI Score: {r['score']}%"
                 )
 
                 await ctx.application.bot.send_message(

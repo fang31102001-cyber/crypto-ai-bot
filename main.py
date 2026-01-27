@@ -34,7 +34,7 @@ QUOTE              = os.getenv("QUOTE", "USDT").upper()
 LABEL_TP_PCT       = float(os.getenv("LABEL_TP_PCT", "0.004"))
 LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 
-CHAT_ID            = int(os.getenv("CHAT_ID", "7992112548"))
+CHAT_ID            = int(os.getenv("CHAT_ID", "5335165612"))
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -384,7 +384,7 @@ def analyze(base: str, tf: str) -> dict:
         return {"skip": True, "reason": "HTF sideways"}
 
     # ===== STRONG BOS (15m) =====
-   bos = detect_bos(df)
+    bos = detect_bos(df)
     if bos == "NO_BOS":
         return {"skip": True, "reason": "Weak / fake BOS"}
 

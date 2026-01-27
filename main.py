@@ -7,6 +7,7 @@ from typing import Tuple
 import ccxt
 import pandas as pd
 import numpy as np
+import pytz
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.error import Conflict
 
@@ -35,20 +36,19 @@ LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 
 CHAT_ID            = int(os.getenv("CHAT_ID", "7992112548"))
 
-DATA_DIR     = "data"
-MEMO_PATH    = os.path.join(DATA_DIR, "memory.json")
-PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
+DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-TRADES_PATH = os.path.join(DATA_DIR, "trades.json")
+TRADES_PATH  = os.path.join(DATA_DIR, "trades.json")
+
 if not os.path.exists(TRADES_PATH):
     with open(TRADES_PATH, "w", encoding="utf-8") as f:
         json.dump([], f)
 
-# create memory.json if missing
-if not os.path.exists(MEMO_PATH):
-    with open(MEMO_PATH, "w", encoding="utf-8") as f:
-        json.dump({"w": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "lr": 0.03, "memory": []}, f, indent=2)
+if not os.path.exists(PENDING_PATH):
+    with open(PENDING_PATH, "w", encoding="utf-8") as f:
+        json.dump({}, f)
+
 
 # ================== KEEP ALIVE ==================
 def start_keep_alive():
@@ -61,16 +61,6 @@ def start_keep_alive():
 
 # ================== Helpers ==================
 VALID_TF = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","12h","1d"}
-def in_trading_hours(start=8, end=22, tz_name="Asia/Ho_Chi_Minh"):
-    try:
-        import pytz
-        tz = pytz.timezone(tz_name)
-        now = datetime.now(tz)
-    except:
-        now = datetime.now()
-
-    hour = now.hour
-    return start <= hour < end
 
 def parse_symbol_tf(text: str, default_tf: str) -> Tuple[str, str]:
     parts = (text or "").strip().lower().split()
@@ -87,6 +77,32 @@ def fmt(x, nd=6):
         return f"{float(x):.{nd}f}"
     except Exception:
         return str(x)
+def cooldown_ok(symbol: str, side: str) -> bool:
+    key = f"{symbol}_{side}"
+    now = time.time()
+    last = LAST_SIGNAL_TIME.get(key, 0)
+    return (now - last) > COOLDOWN_MINUTES * 60
+
+        
+def in_trading_hours(
+    start_hour: int = 8,
+    end_hour: int = 22,
+    tz_name: str = "Asia/Ho_Chi_Minh"
+) -> bool:
+    """
+    Kiểm tra có đang trong giờ trade hay không
+    Mặc định: 08:00 -> 22:00 giờ VN
+    """
+    try:
+        import pytz
+        tz = pytz.timezone(tz_name)
+        now = datetime.now(tz)
+    except Exception:
+        now = datetime.now()
+
+    hour = now.hour
+    return start_hour <= hour < end_hour
+
 
 # ================== CCXT (MEXC Swap) ==================
 EX = ccxt.mexc({
@@ -98,7 +114,35 @@ def symbol_usdt_perp(base: str) -> str:
     return f"{base.upper()}/{QUOTE}:{QUOTE}"
 
 # ================== Indicators ==================
-def ema(s, n): return s.ewm(span=n, adjust=False).mean()
+def ema(s, n): 
+    return s.ewm(span=n, adjust=False).mean()
+    
+def get_htf_trend(base: str) -> str:
+    """
+    Xác định xu hướng khung 1H để lọc trade 15m
+    UP    -> chỉ được LONG
+    DOWN  -> chỉ được SHORT
+    SIDE  -> bỏ qua
+    """
+    df_htf = fetch_ohlcv(base, "1h", limit=300)
+
+    # EMA50 & EMA200 chuẩn
+    df_htf["ema50"] = ema(df_htf["close"], 50)
+    df_htf["ema200"] = ema(df_htf["close"], 200)
+
+    df_htf = df_htf.dropna()
+    if len(df_htf) < 5:
+        return "SIDE"
+
+    ema50 = df_htf["ema50"].iloc[-1]
+    ema200 = df_htf["ema200"].iloc[-1]
+
+    if ema50 > ema200:
+        return "UP"
+    elif ema50 < ema200:
+        return "DOWN"
+    else:
+        return "SIDE"
 
 def rsi(close, n=14):
     d = close.diff()
@@ -119,58 +163,6 @@ def atr(df, n=14):
     tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
-def get_htf_trend(base: str) -> str:
-    df = fetch_ohlcv(base, "1h", limit=200)
-    df["ema50"] = ema(df["close"], 50)
-    df["ema200"] = ema(df["close"], 200)
-    df = df.dropna()
-
-    if len(df) < 5:
-        return "SIDE"
-
-    if df["ema50"].iloc[-1] > df["ema200"].iloc[-1]:
-        return "UP"
-    elif df["ema50"].iloc[-1] < df["ema200"].iloc[-1]:
-        return "DOWN"
-    else:
-        return "SIDE"
-
-def pullback_ok(row: dict, side: str, tolerance: float = 0.003) -> bool:
-    """
-    Kiểm tra giá có hồi về EMA50 hay chưa
-    tolerance = 0.003  ~ 0.3%
-    """
-    price = row["close"]
-    ema50 = row["ema50"]
-
-    if side == "LONG":
-        return price >= ema50 and abs(price - ema50) / ema50 <= tolerance
-
-    if side == "SHORT":
-        return price <= ema50 and abs(price - ema50) / ema50 <= tolerance
-
-    return False
-    
-def buy_sell_pressure(df: pd.DataFrame, lookback: int = 20):
-    """
-    Tính áp lực mua / bán dựa trên volume nến xanh & đỏ
-    Trả về: buy_ratio, sell_ratio (0 → 1)
-    """
-    recent = df.tail(lookback)
-
-    buy_vol = 0.0
-    sell_vol = 0.0
-
-    for _, r in recent.iterrows():
-        if r["close"] > r["open"]:
-            buy_vol += r["volume"]
-        else:
-            sell_vol += r["volume"]
-
-    total = buy_vol + sell_vol + 1e-9
-    return buy_vol / total, sell_vol / total
-
-
 # ================== Market Structure ==================
 def detect_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     high = df["high"]
@@ -186,7 +178,36 @@ def detect_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     if last_close < swing_low.iloc[-2]:
         return "BOS_DOWN"
     return "NO_BOS"
+
+def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float = 0.002) -> bool:
+    high = df["high"]
+    low = df["low"]
+
+    swing_high = high.rolling(lookback).max()
+    swing_low = low.rolling(lookback).min()
+
+    last_close = df["close"].iloc[-1]
+
+    if side == "LONG":
+        level = swing_high.iloc[-2]
+        return abs(last_close - level) / level <= tol
+
+    if side == "SHORT":
+        level = swing_low.iloc[-2]
+        return abs(last_close - level) / level <= tol
+
+    return False
+
 def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
+    """
+    BOS mạnh cho futures:
+    - Close phá swing
+    - Body nến lớn (>=60%)
+    - Volume tăng
+    """
+    if len(df) < lookback + 2:
+        return "NO_BOS"
+
     high = df["high"]
     low = df["low"]
 
@@ -201,34 +222,68 @@ def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     c = last["close"]
 
     body = abs(c - o)
-    rng = h - l
-    if rng == 0:
+    range_ = h - l
+    if range_ == 0:
         return "NO_BOS"
 
-    body_ratio = body / rng
+    body_ratio = body / range_
 
     vol = last["volume"]
     vol_ma = df["volume"].rolling(20).mean().iloc[-2]
 
-    # ===== BOS UP (NẾN XANH) =====
+    # BOS UP
     if (
-        c > swing_high.iloc[-2]
-        and c > o
-        and body_ratio >= 0.6
-        and vol > vol_ma
+        c > swing_high.iloc[-2] and
+        body_ratio >= 0.6 and
+        vol > vol_ma and
+        c > o
     ):
         return "BOS_UP"
 
-    # ===== BOS DOWN (NẾN ĐỎ) =====
+    # BOS DOWN
     if (
-        c < swing_low.iloc[-2]
-        and c < o
-        and body_ratio >= 0.6
-        and vol > vol_ma
+        c < swing_low.iloc[-2] and
+        body_ratio >= 0.6 and
+        vol > vol_ma and
+        c < o
     ):
         return "BOS_DOWN"
 
     return "NO_BOS"
+
+def detect_liquidity_sweep(df: pd.DataFrame, lookback: int = 20) -> str:
+    """
+    Phát hiện quét thanh khoản:
+    SWEEP_UP   -> quét đỉnh
+    SWEEP_DOWN -> quét đáy
+    NO_SWEEP
+    """
+
+    if len(df) < lookback + 5:
+        return "NO_SWEEP"
+
+    high = df["high"]
+    low = df["low"]
+
+    swing_high = high.rolling(lookback).max()
+    swing_low = low.rolling(lookback).min()
+
+    prev_high = swing_high.iloc[-3]
+    prev_low = swing_low.iloc[-3]
+
+    last_high = high.iloc[-2]
+    last_low = low.iloc[-2]
+    last_close = df["close"].iloc[-1]
+
+    # Sweep đáy rồi bật lên
+    if last_low < prev_low and last_close > prev_low:
+        return "SWEEP_DOWN"
+
+    # Sweep đỉnh rồi rơi xuống
+    if last_high > prev_high and last_close < prev_high:
+        return "SWEEP_UP"
+
+    return "NO_SWEEP"
 
 
 # ================== Candlestick patterns ==================
@@ -271,11 +326,13 @@ def fetch_ohlcv(base: str, tf: str, limit: int = 300) -> pd.DataFrame:
 
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
+
     d["ema12"] = ema(d["close"], 12)
     d["ema26"] = ema(d["close"], 26)
-    d["ema50"] = ema(d["close"], 50)
+
     m, s, h = macd(d["close"])
     d["macd"], d["macd_sig"], d["macd_hist"] = m, s, h
+
     d["rsi"] = rsi(d["close"])
     d["atr"] = atr(d)
 
@@ -291,137 +348,77 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Không đủ dữ liệu để phân tích.")
     return d
 
-# ================== Online AI ==================
-class OnlineAI:
-    def __init__(self, path: str):
-        self.path = path
-        self.w = np.zeros(6, dtype=float)
-        self.lr = 0.03
-        self._load()
-
-    def _load(self):
-        if os.path.exists(self.path):
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    obj = json.load(f)
-                self.w = np.array(obj.get("w", self.w.tolist()), dtype=float)
-                self.lr = float(obj.get("lr", self.lr))
-            except Exception:
-                pass
-
-    def _save(self):
-        obj = {}
-        if os.path.exists(self.path):
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    obj = json.load(f)
-            except Exception:
-                obj = {}
-        obj["w"] = self.w.tolist()
-        obj["lr"] = float(self.lr)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, indent=2, ensure_ascii=False)
-
-    def _feat(self, row: dict) -> np.ndarray:
-        trend = (row["ema12"] - row["ema26"]) / (abs(row["ema26"]) + 1e-9)
-        macd_h = float(row["macd_hist"])
-        rsi_c = (float(row["rsi"]) - 50.0) / 50.0
-        volz = float(np.tanh(float(row["vol_z"]) / 3.0))
-        atrp = float(row["atr"]) / max(float(row["close"]), 1e-9)
-        bias = 1.0
-        return np.array([trend, macd_h, rsi_c, volz, atrp, bias], dtype=float)
-
-    def _sigmoid(self, z: float) -> float:
-        if z >= 0:
-            ez = math.exp(-z)
-            return 1.0 / (1.0 + ez)
-        ez = math.exp(z)
-        return ez / (1.0 + ez)
-
-    def score(self, row: dict) -> int:
-        x = self._feat(row)
-        z = float(np.dot(self.w, x))
-        p = self._sigmoid(z)
-        return int(round(p * 100))
-
-    def learn(self, row: dict, label: int):
-        x = self._feat(row)
-        z = float(np.dot(self.w, x))
-        p = self._sigmoid(z)
-        grad = (p - label) * x
-        self.w -= self.lr * grad
-        self._save()
-
-AI = OnlineAI(MEMO_PATH)
 
 # ================== Analysis ==================
-def make_targets(entry: float, atrv: float, side: str):
-    tp1 = entry + (1.5 * atrv if side == "LONG" else -1.5 * atrv)
-    tp2 = entry + (2.5 * atrv if side == "LONG" else -2.5 * atrv)
-    sl  = entry - (1.0 * atrv if side == "LONG" else -1.0 * atrv)
-    return tp1, tp2, sl
-
 def analyze(base: str, tf: str) -> dict:
-    if not in_trading_hours():
-        return {"skip": True, "reason": "Out of trading hours"}
-
+    # ===== TIME FILTER (08h-22h VN) =====
+    if not in_trading_hours(8, 22, TZ):
+        return {"skip": True, "reason": "Out of trading hours (08-22)"}
+        
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
+    # ===== ATR FILTER =====
+    atr_ratio = row["atr"] / row["close"]
 
-    htf = get_htf_trend(base)
-    if htf == "SIDE":
+    if atr_ratio < 0.002:
+        return {"skip": True, "reason": "ATR too low"}
+    
+    #  HTF trend filter (1H)
+    htf_trend = get_htf_trend(base)
+    if htf_trend == "SIDE":
         return {"skip": True, "reason": "HTF sideways"}
 
+    # ===== STRONG BOS (15m) =====
     bos = detect_strong_bos(df)
     if bos == "NO_BOS":
-        return {"skip": True, "reason": "No strong BOS"}
+        return {"skip": True, "reason": "Weak / fake BOS"}
 
+    # Xác định hướng trade
     side = "LONG" if bos == "BOS_UP" else "SHORT"
 
-    if htf == "UP" and side != "LONG":
+    # ===== COOLDOWN =====
+    if not cooldown_ok(base, side):
+        return {"skip": True, "reason": "Cooldown"}
+
+    # ===== BREAK & RETEST =====
+    if not break_retest_ok(df, side):
+        return {"skip": True, "reason": "No break & retest"}
+    # ===== LIQUIDITY SWEEP FILTER =====
+    sweep = detect_liquidity_sweep(df)
+
+    if side == "LONG" and sweep != "SWEEP_DOWN":
+        return {"skip": True, "reason": "No liquidity sweep down"}
+
+    if side == "SHORT" and sweep != "SWEEP_UP":
+        return {"skip": True, "reason": "No liquidity sweep up"}
+
+
+    # ===== HTF DIRECTION LOCK =====
+    if htf_trend == "UP" and side != "LONG":
         return {"skip": True, "reason": "HTF UP only LONG"}
 
-    if htf == "DOWN" and side != "SHORT":
+    if htf_trend == "DOWN" and side != "SHORT":
         return {"skip": True, "reason": "HTF DOWN only SHORT"}
 
-    buy_ratio, sell_ratio = buy_sell_pressure(df)
-
-    if side == "LONG" and buy_ratio < 0.6:
-        return {"skip": True, "reason": "Weak buy pressure"}
-
-    if side == "SHORT" and sell_ratio < 0.6:
-        return {"skip": True, "reason": "Weak sell pressure"}
-# ===== RSI FILTER =====
-    rsi_val = float(row["rsi"])
-
-    if side == "LONG" and not (45 <= rsi_val <= 65):
-        return {"skip": True, "reason": f"RSI not good for LONG ({rsi_val:.1f})"}
-
-    if side == "SHORT" and not (35 <= rsi_val <= 55):
-        return {"skip": True, "reason": f"RSI not good for SHORT ({rsi_val:.1f})"}
-# ===== ENTRY CANDLE CONFIRM =====
-    pattern = row["pattern"]
-
-    if side == "LONG" and pattern not in ["Bullish Engulfing 💚", "Hammer 🟢"]:
-        return {"skip": True, "reason": f"No bullish candle ({pattern})"}
-
-    if side == "SHORT" and pattern not in ["Bearish Engulfing ❤️", "Inverted Hammer 🔴"]:
-        return {"skip": True, "reason": f"No bearish candle ({pattern})"}
-
-
-    if not pullback_ok(row, side):
-        return {"skip": True, "reason": "No pullback EMA50"}
-
+    # ===== VOLUME CONFIRM =====
     if abs(row["vol_z"]) < MIN_VOLZ:
         return {"skip": True, "reason": "Weak volume"}
+    # ===== RSI FILTER =====
+    rsi_val = row["rsi"]
 
-    score = AI.score(row)
+    if side == "LONG" and not (45 <= rsi_val <= 65):
+        return {"skip": True, "reason": "RSI not good LONG"}
 
+    if side == "SHORT" and not (35 <= rsi_val <= 55):
+        return {"skip": True, "reason": "RSI not good SHORT"}
+    
+    # 3. TP / SL theo ATR
     entry = float(row["close"])
     atrv = float(row["atr"])
-    tp = entry + (2 * atrv if side == "LONG" else -2 * atrv)
-    sl = entry - (1 * atrv if side == "LONG" else -1 * atrv)
+    tp = entry + (2.0 * atrv if side == "LONG" else -2.0 * atrv)
+    sl = entry - (1.0 * atrv if side == "LONG" else -1.0 * atrv)
 
+    # 4. Lưu trade để theo dõi WIN / LOSE
     trade = {
         "time": datetime.utcnow().isoformat(),
         "base": base,
@@ -430,8 +427,6 @@ def analyze(base: str, tf: str) -> dict:
         "entry": entry,
         "tp": tp,
         "sl": sl,
-        "trailing_sl": sl,
-        "features": AI._feat(row).tolist(),
         "status": "OPEN"
     }
 
@@ -440,21 +435,17 @@ def analyze(base: str, tf: str) -> dict:
         trades.append(trade)
         f.seek(0)
         json.dump(trades, f, indent=2)
+    LAST_SIGNAL_TIME[f"{base}_{side}"] = time.time()
 
     return {
-    "base": base.upper(),
-    "tf": tf,
-    "side": side,
-    "price": entry,
-    "tp": tp,
-    "sl": sl,
-    "score": score,
-    "bos": bos,
-    "buy_ratio": round(buy_ratio * 100, 1),
-    "sell_ratio": round(sell_ratio * 100, 1),
-    "pattern": pattern,
-}
-
+        "base": base.upper(),
+        "tf": tf,
+        "side": side,
+        "price": entry,
+        "tp": tp,
+        "sl": sl,
+        "bos": bos
+    }
 def update_trades_and_learn():
     with open(TRADES_PATH, "r+", encoding="utf-8") as f:
         trades = json.load(f)
@@ -468,55 +459,22 @@ def update_trades_and_learn():
         df = fetch_ohlcv(t["base"], t["tf"], limit=5)
         high = df["high"].iloc[-1]
         low = df["low"].iloc[-1]
-        price = df["close"].iloc[-1]
-        atr_trail = t["features"][4] * 2   # 2 ATR
 
+        if t["side"] == "LONG":
+            if high >= t["tp"]:
+                t["status"] = "WIN"
+                changed = True
+            elif low <= t["sl"]:
+                t["status"] = "LOSE"
+                changed = True
 
-        row = {
-            "ema12": 1.0 + t["features"][0],
-            "ema26": 1.0,
-            "macd_hist": t["features"][1],
-            "rsi": 50.0 + t["features"][2] * 50.0,
-            "vol_z": t["features"][3],
-            "atr": max(t["features"][4], 1e-6),
-            "close": 1.0
-        }
-
-     # ===== TRAILING STOP LOGIC =====
-
-    if t["side"] == "LONG":
-
-        new_sl = price - atr_trail
-        if new_sl > t["trailing_sl"]:
-            t["trailing_sl"] = new_sl
-
-        if low <= t["trailing_sl"]:
-            t["status"] = "WIN"
-            AI.learn(row, 1)
-             changed = True
-
-        elif high >= t["tp"]:
-            t["status"] = "WIN"
-            AI.learn(row, 1)
-            changed = True
-
-
-    if t["side"] == "SHORT":
-
-        new_sl = price + atr_trail
-        if new_sl < t["trailing_sl"]:
-            t["trailing_sl"] = new_sl
-
-        if high >= t["trailing_sl"]:
-            t["status"] = "WIN"
-            AI.learn(row, 1)
-            changed = True
-
-        elif low <= t["tp"]:
-            t["status"] = "WIN"
-            AI.learn(row, 1)
-            changed = True
-
+        if t["side"] == "SHORT":
+            if low <= t["tp"]:
+                t["status"] = "WIN"
+                changed = True
+            elif high >= t["sl"]:
+                t["status"] = "LOSE"
+                changed = True
 
     if changed:
         with open(TRADES_PATH, "w", encoding="utf-8") as f:
@@ -544,13 +502,9 @@ async def handle_text(update, ctx):
         msg = (
             f"📊 {r['base']} ({r['tf']})\n"
             f"Hướng: {r['side']} | BOS: {r['bos']}\n"
-            f"Candle: {r['pattern']}\n"
             f"Entry: {fmt(r['price'])}\n"
             f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-            f"AI Score: {r['score']}%\n"
-            f"Buy: {r['buy_ratio']}% | Sell: {r['sell_ratio']}%"
         )
-
         await update.message.reply_text(msg)
 
     except Exception as e:
@@ -559,6 +513,9 @@ async def handle_text(update, ctx):
 
 # ================== Auto scan ==================
 async def auto_scan(ctx):
+    # ===== TIME FILTER (08h-22h VN) =====
+    if not in_trading_hours(8, 22, TZ):
+        return
     chat_id = int(ctx.job.data["chat_id"])
     update_trades_and_learn()
     top = ["BTC","ETH","SOL","WLD","XRP","TON","ARB","LINK","PEPE","SUI"]
@@ -570,14 +527,12 @@ async def auto_scan(ctx):
             if r.get("skip"):
                 continue
 
-            if r["score"] >= ALERT_THRESHOLD:
+            if not r.get("skip"):
                 msg = (
                     f"🔥 Tín hiệu mạnh — {r['base']}/USDT ({r['tf']})\n"
                     f"Hướng: {r['side']} | BOS: {r['bos']}\n"
                     f"Entry: {fmt(r['price'])}\n"
                     f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-                    f"AI Score: {r['score']}%\n"
-                    f"Buy: {r['buy_ratio']}% | Sell: {r['sell_ratio']}%"
                 )
 
                 await ctx.application.bot.send_message(
@@ -588,125 +543,6 @@ async def auto_scan(ctx):
         except Exception as e:
             log.warning("scan fail %s: %r", coin, e)
 
-# ================== Drive Sync (tự tắt nếu invalid_grant) ==================
-import io, threading
-from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-
-_drive_enabled = True  # sẽ tắt nếu invalid_grant
-
-def _has_drive_env() -> bool:
-    return all([
-        os.getenv("GOOGLE_REFRESH_TOKEN"),
-        os.getenv("GOOGLE_CLIENT_ID"),
-        os.getenv("GOOGLE_CLIENT_SECRET"),
-    ])
-
-def google_creds():
-    return Credentials(
-        None,
-        refresh_token=os.getenv("GOOGLE_REFRESH_TOKEN"),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-        scopes=[
-            "https://www.googleapis.com/auth/drive.file",
-            "https://www.googleapis.com/auth/drive.metadata.readonly",
-        ],
-    )
-
-def _is_invalid_grant(err: Exception) -> bool:
-    s = repr(err).lower()
-    return "invalid_grant" in s or "bad request" in s
-
-def sync_ai_memory_to_drive():
-    global _drive_enabled
-    if not _drive_enabled:
-        return
-    try:
-        if not os.path.exists(MEMO_PATH):
-            return
-
-        with open(MEMO_PATH, "r", encoding="utf-8") as f:
-            memory_data = json.load(f)
-
-        memory_data["_last_synced_utc"] = datetime.now(timezone.utc).isoformat()
-
-        with open("AI_memory.json", "w", encoding="utf-8") as f:
-            json.dump(memory_data, f, indent=2, ensure_ascii=False)
-
-        creds = google_creds()
-        service = build("drive", "v3", credentials=creds)
-
-        media = MediaFileUpload("AI_memory.json", mimetype="application/json")
-        resp = service.files().list(q="name='AI_memory.json'", spaces="drive").execute()
-
-        if resp.get("files"):
-            file_id = resp["files"][0]["id"]
-            service.files().update(fileId=file_id, media_body=media).execute()
-        else:
-            meta = {"name": "AI_memory.json"}
-            service.files().create(body=meta, media_body=media, fields="id").execute()
-
-    except Exception as e:
-        if _is_invalid_grant(e):
-            _drive_enabled = False
-            print("⛔ Google Drive invalid_grant -> TẮT sync Drive (cần cấp lại refresh token).", flush=True)
-        else:
-            print("⚠️ Drive Sync Error:", repr(e), flush=True)
-
-def load_ai_memory_from_drive():
-    global _drive_enabled
-    if not _drive_enabled:
-        return None
-    try:
-        creds = google_creds()
-        service = build("drive", "v3", credentials=creds)
-        results = service.files().list(q="name='AI_memory.json'", spaces="drive").execute()
-        files = results.get("files", [])
-        if not files:
-            return None
-
-        file_id = files[0]["id"]
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-
-        fh.seek(0)
-        data = json.load(fh)
-
-        with open(MEMO_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-
-        if "w" in data:
-            AI.w = np.array(data["w"], dtype=float)
-
-        print("✅ Đã tải AI_memory.json từ Drive.", flush=True)
-        return data
-
-    except Exception as e:
-        if _is_invalid_grant(e):
-            _drive_enabled = False
-            print("⛔ Google Drive invalid_grant -> TẮT sync Drive (cần cấp lại refresh token).", flush=True)
-        else:
-            print("⚠️ Lỗi khi tải AI_memory.json:", repr(e), flush=True)
-        return None
-
-def auto_backup_loop(interval_hours=3):
-    def loop():
-        while True:
-            try:
-                sync_ai_memory_to_drive()
-                if _drive_enabled:
-                    print(f"🕒 Drive sync ({datetime.now().strftime('%H:%M:%S')})", flush=True)
-            except Exception as e:
-                print("⚠️ Lỗi auto backup:", repr(e), flush=True)
-            time.sleep(interval_hours * 3600)
-    threading.Thread(target=loop, daemon=True).start()
 
 # ================== Run ==================
 def _seconds_to_next_hour(tz_name: str) -> int:
@@ -737,14 +573,10 @@ async def on_error(update, ctx):
 def main():
     start_keep_alive()
 
+    print("AUTO_SCAN =", AUTO_SCAN)
+
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Thiếu TELEGRAM_BOT_TOKEN trong Environment Variables.")
-
-    if _has_drive_env():
-        load_ai_memory_from_drive()
-        auto_backup_loop(3)
-    else:
-        print("ℹ️ Thiếu Google Drive ENV -> bỏ qua sync.", flush=True)
 
     # retry loop để không chết vì Conflict (Render restart/deploy chồng)
     while True:

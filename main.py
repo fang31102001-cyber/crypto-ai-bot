@@ -384,7 +384,7 @@ def analyze(base: str, tf: str) -> dict:
         return {"skip": True, "reason": "HTF sideways"}
 
     # ===== STRONG BOS (15m) =====
-    bos = detect_strong_bos(df)
+   bos = detect_bos(df)
     if bos == "NO_BOS":
         return {"skip": True, "reason": "Weak / fake BOS"}
 
@@ -398,15 +398,6 @@ def analyze(base: str, tf: str) -> dict:
     # ===== BREAK & RETEST =====
     if not break_retest_ok(df, side):
         return {"skip": True, "reason": "No break & retest"}
-    # ===== LIQUIDITY SWEEP FILTER =====
-    sweep = detect_liquidity_sweep(df)
-
-    if side == "LONG" and sweep != "SWEEP_DOWN":
-        return {"skip": True, "reason": "No liquidity sweep down"}
-
-    if side == "SHORT" and sweep != "SWEEP_UP":
-        return {"skip": True, "reason": "No liquidity sweep up"}
-
 
     # ===== HTF DIRECTION LOCK =====
     if htf_trend == "UP" and side != "LONG":
@@ -421,11 +412,11 @@ def analyze(base: str, tf: str) -> dict:
     # ===== RSI FILTER =====
     rsi_val = row["rsi"]
 
-    if side == "LONG" and not (45 <= rsi_val <= 65):
-        return {"skip": True, "reason": "RSI not good LONG"}
+    if side == "LONG" and rsi_val > 70:
+    return {"skip": True, "reason": "RSI overbought"}
 
-    if side == "SHORT" and not (35 <= rsi_val <= 55):
-        return {"skip": True, "reason": "RSI not good SHORT"}
+if side == "SHORT" and rsi_val < 30:
+    return {"skip": True, "reason": "RSI oversold"}
     # ===== EMA50 PULLBACK =====
     if not ema_pullback_ok(row, side):
         return {"skip": True, "reason": "No EMA50 pullback"}

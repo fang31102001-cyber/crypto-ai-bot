@@ -89,13 +89,13 @@ def cooldown_ok(symbol: str, side: str) -> bool:
 
         
 def in_trading_hours(
-    start_hour: int = 8,
+    start_hour: int = 7,
     end_hour: int = 22,
     tz_name: str = "Asia/Ho_Chi_Minh"
 ) -> bool:
     """
     Kiểm tra có đang trong giờ trade hay không
-    Mặc định: 08:00 -> 22:00 giờ VN
+    Mặc định: 07:00 -> 22:00 giờ VN
     """
     try:
         import pytz
@@ -369,9 +369,9 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
 
 # ================== Analysis ==================
 def analyze(base: str, tf: str) -> dict:
-    # ===== TIME FILTER (08h-22h VN) =====
-    if not in_trading_hours(8, 22, TZ):
-        return {"skip": True, "reason": "Out of trading hours (08-22)"}
+    # ===== TIME FILTER (07h-22h VN) =====
+    if not in_trading_hours(7, 22, TZ):
+        return {"skip": True, "reason": "Out of trading hours (07-22)"}
         
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
@@ -526,34 +526,37 @@ async def handle_text(update, ctx):
 
 # ================== Auto scan ==================
 async def auto_scan(ctx):
-    # ===== TIME FILTER (08h-22h VN) =====
-    if not in_trading_hours(8, 22, TZ):
+    # ===== TIME FILTER (07h-22h VN) =====
+    if not in_trading_hours(7, 22, TZ):
         return
+
     chat_id = int(ctx.job.data["chat_id"])
     update_trades_and_learn()
+
     top = ["BTC","ETH","SOL","WLD","XRP","TON","ARB","LINK","PEPE","SUI"]
 
     for coin in top:
-    try:
-        r = analyze(coin, TIMEFRAME_DEFAULT)
+        try:
+            r = analyze(coin, TIMEFRAME_DEFAULT)
 
-        if r.get("skip"):
-            continue
+            if r.get("skip"):
+                continue
 
-        msg = (
-            f"🔥 Tín hiệu mạnh — {r['base']}/USDT ({r['tf']})\n"
-            f"Hướng: {r['side']} | BOS: {r['bos']}\n"
-            f"Entry: {fmt(r['price'])}\n"
-            f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-        )
+            msg = (
+                f"🔥 Tín hiệu mạnh — {r['base']}/USDT ({r['tf']})\n"
+                f"Hướng: {r['side']} | BOS: {r['bos']}\n"
+                f"Entry: {fmt(r['price'])}\n"
+                f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
+            )
 
-        await ctx.application.bot.send_message(
-            chat_id=chat_id,
-            text=msg
-        )
+            await ctx.application.bot.send_message(
+                chat_id=chat_id,
+                text=msg
+            )
 
-    except Exception as e:
-        log.warning("scan fail %s: %r", coin, e)
+        except Exception as e:
+            log.warning("scan fail %s: %r", coin, e)
+
 
 
 # ================== Run ==================

@@ -593,37 +593,28 @@ def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("Thiếu TELEGRAM_BOT_TOKEN trong Environment Variables.")
 
-    # retry loop để không chết vì Conflict (Render restart/deploy chồng)
-    while True:
-        try:
-            app = (
-                ApplicationBuilder()
-                .token(TELEGRAM_BOT_TOKEN)
-                .post_init(post_init)
-                .build()
-            )
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
-            app.add_handler(CommandHandler("start", cmd_start))
-            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-            app.add_error_handler(on_error)
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_error_handler(on_error)
 
-            if AUTO_SCAN:
-                first = _seconds_to_next_hour(TZ)
-                app.job_queue.run_repeating(
-                    auto_scan,
-                    interval=SCAN_INTERVAL_SEC,
-                    first=first,
-                    data={"chat_id": CHAT_ID},
-                )
+    if AUTO_SCAN:
+        first = _seconds_to_next_hour(TZ)
+        app.job_queue.run_repeating(
+            auto_scan,
+            interval=SCAN_INTERVAL_SEC,
+            first=first,
+            data={"chat_id": CHAT_ID},
+        )
 
-            print("🤖 Bot polling start...", flush=True)
-            app.run_polling(drop_pending_updates=True, allowed_updates=None)
-            break
-
-        except Conflict:
-            wait = 20 + random.randint(0, 20)
-            print(f"⚠️ Conflict getUpdates -> đợi {wait}s rồi chạy lại...", flush=True)
-            time.sleep(wait)
+    print("🤖 Bot polling start...", flush=True)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()

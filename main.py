@@ -26,7 +26,7 @@ TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
 SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "3600"))
 ALERT_THRESHOLD    = int(os.getenv("ALERT_THRESHOLD", "80"))
-MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "2"))
+MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.6"))
 
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
 QUOTE              = os.getenv("QUOTE", "USDT").upper()
@@ -183,7 +183,7 @@ def detect_bos(df: pd.DataFrame, lookback: int = 20) -> str:
         return "BOS_DOWN"
     return "NO_BOS"
 
-def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float = 0.002) -> bool:
+def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float = 0.004) -> bool:
     high = df["high"]
     low = df["low"]
 
@@ -238,7 +238,7 @@ def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     # BOS UP
     if (
         c > swing_high.iloc[-2] and
-        body_ratio >= 0.6 and
+        body_ratio >= 0.45 and
         vol > vol_ma and
         c > o
     ):
@@ -368,6 +368,16 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ================== Analysis ==================
+def dynamic_atr_threshold(atr_ratio: float) -> float:
+    if atr_ratio >= 0.01:
+        return 0.002     # market rất mạnh
+    elif atr_ratio >= 0.006:
+        return 0.0015
+    elif atr_ratio >= 0.003:
+        return 0.0012
+    else:
+        return 0.001     # market yếu
+
 def analyze(base: str, tf: str) -> dict:
     # ===== TIME FILTER (07h-22h VN) =====
     if not in_trading_hours(7, 22, TZ):
@@ -378,9 +388,12 @@ def analyze(base: str, tf: str) -> dict:
     # ===== ATR FILTER =====
     atr_ratio = row["atr"] / row["close"]
 
-    if atr_ratio < 0.002:
+    min_atr = dynamic_atr_threshold(atr_ratio)
+    log.info(f"{base} ATR={atr_ratio:.5f} MIN_ATR={min_atr}")
+
+    if atr_ratio < min_atr:
         return {"skip": True, "reason": "ATR too low"}
-    
+
     #  HTF trend filter (1H)
     htf_trend = get_htf_trend(base)
     if htf_trend == "SIDE":

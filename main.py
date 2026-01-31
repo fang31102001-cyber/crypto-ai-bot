@@ -168,20 +168,26 @@ def atr(df, n=14):
     return tr.rolling(n).mean()
 
 # ================== Market Structure ==================
-def detect_bos(df: pd.DataFrame, lookback: int = 12) -> str:
+def detect_bos(df: pd.DataFrame, lookback: int = 8) -> str:
     high = df["high"]
     low = df["low"]
 
     swing_high = high.rolling(lookback).max()
     swing_low = low.rolling(lookback).min()
 
+    prev_close = df["close"].iloc[-2]
     last_close = df["close"].iloc[-1]
 
-    if last_close > swing_high.iloc[-2]:
+    # phá đỉnh
+    if last_close > swing_high.iloc[-2] and last_close > prev_close:
         return "BOS_UP"
-    if last_close < swing_low.iloc[-2]:
+
+    # phá đáy
+    if last_close < swing_low.iloc[-2] and last_close < prev_close:
         return "BOS_DOWN"
+
     return "NO_BOS"
+
 
 def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float = 0.004) -> bool:
     high = df["high"]

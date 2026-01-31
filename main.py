@@ -168,7 +168,7 @@ def atr(df, n=14):
     return tr.rolling(n).mean()
 
 # ================== Market Structure ==================
-def detect_bos(df: pd.DataFrame, lookback: int = 20) -> str:
+def detect_bos(df: pd.DataFrame, lookback: int = 12) -> str:
     high = df["high"]
     low = df["low"]
 
@@ -202,7 +202,7 @@ def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float 
 
     return False
 
-def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
+def detect_strong_bos(df: pd.DataFrame, lookback: int = 12) -> str:
     if len(df) < lookback + 2:
         return "NO_BOS"
 
@@ -368,11 +368,15 @@ def analyze(base: str, tf: str) -> dict:
     if atr_ratio < min_atr:
         return {"skip": True, "reason": "ATR too low"}
 
-    # ===== STRONG BOS (15m) =====
+    # ===== FLEXIBLE BOS =====
     bos = detect_strong_bos(df)
-    log.info(f"{base} BOS={bos}")
+
     if bos == "NO_BOS":
-        return {"skip": True, "reason": "Weak / fake BOS"}
+        bos = detect_bos(df)
+
+    if bos == "NO_BOS":
+        return {"skip": True, "reason": "No BOS"}
+
 
     # Xác định hướng trade
     side = "LONG" if bos == "BOS_UP" else "SHORT"

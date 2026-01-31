@@ -26,7 +26,7 @@ TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
 SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "3600"))
 ALERT_THRESHOLD    = int(os.getenv("ALERT_THRESHOLD", "80"))
-MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.6"))
+MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.3"))
 
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
 QUOTE              = os.getenv("QUOTE", "USDT").upper()
@@ -394,13 +394,8 @@ def analyze(base: str, tf: str) -> dict:
     if atr_ratio < min_atr:
         return {"skip": True, "reason": "ATR too low"}
 
-    #  HTF trend filter (1H)
-    htf_trend = get_htf_trend(base)
-    if htf_trend == "SIDE":
-        return {"skip": True, "reason": "HTF sideways"}
-
     # ===== STRONG BOS (15m) =====
-    bos = detect_strong_bos(df)
+    bos = detect_bos(df)
     if bos == "NO_BOS":
         return {"skip": True, "reason": "Weak / fake BOS"}
 
@@ -410,17 +405,6 @@ def analyze(base: str, tf: str) -> dict:
     # ===== COOLDOWN =====
     if not cooldown_ok(base, side):
         return {"skip": True, "reason": "Cooldown"}
-
-    # ===== BREAK & RETEST =====
-    if not break_retest_ok(df, side):
-        return {"skip": True, "reason": "No break & retest"}
-
-    # ===== HTF DIRECTION LOCK =====
-    if htf_trend == "UP" and side != "LONG":
-        return {"skip": True, "reason": "HTF UP only LONG"}
-
-    if htf_trend == "DOWN" and side != "SHORT":
-        return {"skip": True, "reason": "HTF DOWN only SHORT"}
 
     # ===== VOLUME CONFIRM =====
     if abs(row["vol_z"]) < MIN_VOLZ:
@@ -433,11 +417,7 @@ def analyze(base: str, tf: str) -> dict:
 
     if side == "SHORT" and rsi_val < 30:
         return {"skip": True, "reason": "RSI oversold"}
-    # ===== EMA50 PULLBACK =====
-    if not ema_pullback_ok(row, side):
-        return {"skip": True, "reason": "No EMA50 pullback"}
 
-    
     # 3. TP / SL theo ATR
     entry = float(row["close"])
     atrv = float(row["atr"])

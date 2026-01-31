@@ -36,7 +36,7 @@ LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 
 CHAT_ID            = int(os.getenv("CHAT_ID", "5335165612"))
 LAST_SIGNAL_TIME = {}
-COOLDOWN_MINUTES = 60
+COOLDOWN_MINUTES = 5
 
 
 DATA_DIR = "data"
@@ -203,12 +203,6 @@ def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float 
     return False
 
 def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
-    """
-    BOS mạnh cho futures:
-    - Close phá swing
-    - Body nến lớn (>=60%)
-    - Volume tăng
-    """
     if len(df) < lookback + 2:
         return "NO_BOS"
 
@@ -221,39 +215,19 @@ def detect_strong_bos(df: pd.DataFrame, lookback: int = 20) -> str:
     last = df.iloc[-1]
 
     o = last["open"]
-    h = last["high"]
-    l = last["low"]
     c = last["close"]
+    v = last["volume"]
 
-    body = abs(c - o)
-    range_ = h - l
-    if range_ == 0:
-        return "NO_BOS"
-
-    body_ratio = body / range_
-
-    vol = last["volume"]
     vol_ma = df["volume"].rolling(20).mean().iloc[-2]
 
-    # BOS UP
-    if (
-        c > swing_high.iloc[-2] and
-        body_ratio >= 0.45 and
-        vol > vol_ma and
-        c > o
-    ):
+    if c > swing_high.iloc[-2] and c > o and v >= vol_ma * 0.8:
         return "BOS_UP"
 
-    # BOS DOWN
-    if (
-        c < swing_low.iloc[-2] and
-        body_ratio >= 0.6 and
-        vol > vol_ma and
-        c < o
-    ):
+    if c < swing_low.iloc[-2] and c < o and v >= vol_ma * 0.8:
         return "BOS_DOWN"
 
     return "NO_BOS"
+
 
 def detect_liquidity_sweep(df: pd.DataFrame, lookback: int = 20) -> str:
     """
@@ -395,7 +369,8 @@ def analyze(base: str, tf: str) -> dict:
         return {"skip": True, "reason": "ATR too low"}
 
     # ===== STRONG BOS (15m) =====
-    bos = detect_bos(df)
+    bos = detect_strong_bos(df)
+    log.info(f"{base} BOS={bos}")
     if bos == "NO_BOS":
         return {"skip": True, "reason": "Weak / fake BOS"}
 

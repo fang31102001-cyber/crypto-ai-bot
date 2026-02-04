@@ -1,7 +1,7 @@
 # main.py
 import os, math, json, time, random, logging
 from threading import Thread
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Tuple
 
 import ccxt
@@ -34,8 +34,12 @@ QUOTE              = os.getenv("QUOTE", "USDT").upper()
 LABEL_TP_PCT       = float(os.getenv("LABEL_TP_PCT", "0.004"))
 LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 
-CHAT_ID            = int(os.getenv("CHAT_ID", "5335165612"))
+CHAT_IDS = [
+    5335165612,
+    5895497001
+]
 LAST_SIGNAL_TIME = {}
+LAST_BAR_SIGNAL = {}
 COOLDOWN_MINUTES = 5
 
 
@@ -358,20 +362,24 @@ def dynamic_atr_threshold(atr_ratio: float) -> float:
     else:
         return 0.001     # market yếu
 
-def analyze(base: str, tf: str) -> dict:
+def analyze(base: str, tf: str, manual=False) -> dict:
     # ===== TIME FILTER (07h-22h VN) =====
     if not in_trading_hours(7, 22, TZ):
         return {"skip": True, "reason": "Out of trading hours (07-22)"}
         
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
+    last_bar = df["ts"].iloc[-1]
+    if LAST_BAR_SIGNAL.get(base) == last_bar:
+        return {"skip": True, "reason": "Duplicate candle"}
+
     # ===== ATR FILTER =====
     atr_ratio = row["atr"] / row["close"]
 
     min_atr = dynamic_atr_threshold(atr_ratio)
     log.info(f"{base} ATR={atr_ratio:.5f} MIN_ATR={min_atr}")
 
-    if atr_ratio < min_atr:
+    if not manual and atr_ratio < min_atr:
         return {"skip": True, "reason": "ATR too low"}
 
     # ===== FLEXIBLE BOS =====
@@ -388,11 +396,10 @@ def analyze(base: str, tf: str) -> dict:
     side = "LONG" if bos == "BOS_UP" else "SHORT"
 
     # ===== COOLDOWN =====
-    if not cooldown_ok(base, side):
+    if not manual and not cooldown_ok(base, side):
         return {"skip": True, "reason": "Cooldown"}
-
     # ===== VOLUME CONFIRM =====
-    if abs(row["vol_z"]) < MIN_VOLZ:
+    if not manual and abs(row["vol_z"]) < MIN_VOLZ:
         return {"skip": True, "reason": "Weak volume"}
     # ===== RSI FILTER =====
     rsi_val = row["rsi"]
@@ -427,6 +434,7 @@ def analyze(base: str, tf: str) -> dict:
         f.seek(0)
         json.dump(trades, f, indent=2)
     LAST_SIGNAL_TIME[f"{base}_{side}"] = time.time()
+    LAST_BAR_SIGNAL[base] = df["ts"].iloc[-1]
 
     return {
         "base": base.upper(),
@@ -484,7 +492,7 @@ async def handle_text(update, ctx):
     try:
         update_trades_and_learn()
         base, tf = parse_symbol_tf(text, TIMEFRAME_DEFAULT)
-        r = analyze(base, tf)
+        r = analyze(base, tf, manual=True)
 
         if r.get("skip"):
             await update.message.reply_text(f"⏭️ Bỏ qua: {r['reason']}")
@@ -501,23 +509,23 @@ async def handle_text(update, ctx):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Lỗi phân tích: {e}")
 
-
 # ================== Auto scan ==================
 async def auto_scan(ctx):
     # ===== TIME FILTER (07h-22h VN) =====
     if not in_trading_hours(7, 22, TZ):
         return
 
-    chat_id = int(ctx.job.data["chat_id"])
+    chat_ids = ctx.job.data["chat_ids"]
     update_trades_and_learn()
 
     top = ["BTC","ETH","SOL","WLD","XRP","TON","ARB","LINK","PEPE","SUI"]
 
     for coin in top:
         try:
-            r = analyze(coin, TIMEFRAME_DEFAULT)
+            r = analyze(coin, TIMEFRAME_DEFAULT, manual=False)
 
             if r.get("skip"):
+                log.info(f"{coin} skip: {r['reason']}")
                 continue
 
             msg = (
@@ -527,14 +535,14 @@ async def auto_scan(ctx):
                 f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
             )
 
-            await ctx.application.bot.send_message(
-                chat_id=chat_id,
-                text=msg
-            )
+            for cid in chat_ids:
+                await ctx.application.bot.send_message(
+                    chat_id=cid,
+                    text=msg
+                )
 
         except Exception as e:
             log.warning("scan fail %s: %r", coin, e)
-
 
 
 # ================== Run ==================
@@ -588,7 +596,7 @@ def main():
             auto_scan,
             interval=SCAN_INTERVAL_SEC,
             first=first,
-            data={"chat_id": CHAT_ID},
+            data={"chat_ids": CHAT_IDS},
         )
 
     print("🤖 Bot polling start...", flush=True)

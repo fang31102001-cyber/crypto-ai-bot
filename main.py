@@ -382,24 +382,33 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     if not manual and atr_ratio < min_atr:
         return {"skip": True, "reason": "ATR too low"}
 
-    # ===== FLEXIBLE BOS =====
-    bos = detect_strong_bos(df)
+    # ===== SMART MONEY LOGIC =====
 
+    sweep = detect_liquidity_sweep(df)
+
+    if sweep == "NO_SWEEP":
+        return {"skip": True, "reason": "No Sweep"}
+
+    bos = detect_strong_bos(df)
     if bos == "NO_BOS":
         bos = detect_bos(df)
 
     if bos == "NO_BOS":
-        return {"skip": True, "reason": "No BOS"}
+        return {"skip": True, "reason": "No BOS after sweep"}
 
 
     # Xác định hướng trade
     side = "LONG" if bos == "BOS_UP" else "SHORT"
 
+    # ===== RETEST CONFIRM =====
+    if not break_retest_ok(df, side):
+        return {"skip": True, "reason": "No retest"}
+        
     # ===== COOLDOWN =====
     if not manual and not cooldown_ok(base, side):
         return {"skip": True, "reason": "Cooldown"}
     # ===== VOLUME CONFIRM =====
-    if not manual and abs(row["vol_z"]) < MIN_VOLZ:
+    if abs(row["vol_z"]) < 0.5:
         return {"skip": True, "reason": "Weak volume"}
     # ===== RSI FILTER =====
     rsi_val = row["rsi"]
@@ -436,6 +445,8 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     LAST_SIGNAL_TIME[f"{base}_{side}"] = time.time()
     LAST_BAR_SIGNAL[base] = df["ts"].iloc[-1]
 
+    wins, losses, winrate = calculate_winrate()
+
     return {
         "base": base.upper(),
         "tf": tf,
@@ -443,7 +454,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         "price": entry,
         "tp": tp,
         "sl": sl,
-        "bos": bos
+        "bos": bos,
+        "wins": wins,
+        "losses": losses,
+        "winrate": winrate
     }
 def update_trades_and_learn():
     with open(TRADES_PATH, "r+", encoding="utf-8") as f:
@@ -479,6 +493,23 @@ def update_trades_and_learn():
         with open(TRADES_PATH, "w", encoding="utf-8") as f:
             json.dump(trades, f, indent=2)
 
+def calculate_winrate():
+    try:
+        with open(TRADES_PATH, "r", encoding="utf-8") as f:
+            trades = json.load(f)
+    except:
+        return 0, 0, 0
+
+    wins = sum(1 for t in trades if t.get("status") == "WIN")
+    losses = sum(1 for t in trades if t.get("status") == "LOSE")
+
+    total = wins + losses
+    if total == 0:
+        return 0, wins, losses
+
+    winrate = round((wins / total) * 100, 2)
+    return winrate, wins, losses
+
 # ================== Telegram ==================
 async def cmd_start(update, ctx):
     await update.message.reply_text(
@@ -503,6 +534,7 @@ async def handle_text(update, ctx):
             f"Hướng: {r['side']} | BOS: {r['bos']}\n"
             f"Entry: {fmt(r['price'])}\n"
             f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
+            f"📊 {r['base']} ({r['tf']})\n"
         )
         await update.message.reply_text(msg)
 
@@ -533,6 +565,7 @@ async def auto_scan(ctx):
                 f"Hướng: {r['side']} | BOS: {r['bos']}\n"
                 f"Entry: {fmt(r['price'])}\n"
                 f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
+                f"\n📊 Winrate: {winrate}% ({wins}W / {losses}L)"
             )
 
             for cid in chat_ids:

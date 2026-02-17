@@ -370,7 +370,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     row = df.iloc[-1].to_dict()
     last_bar = df["ts"].iloc[-1]
-    if LAST_BAR_SIGNAL.get(base) == last_bar:
+    if not manual and LAST_BAR_SIGNAL.get(base) == last_bar:
         return {"skip": True, "reason": "Duplicate candle"}
 
     # ===== ATR FILTER =====

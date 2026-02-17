@@ -504,12 +504,9 @@ def calculate_winrate():
     losses = sum(1 for t in trades if t.get("status") == "LOSE")
 
     total = wins + losses
-    if total == 0:
-        return 0, wins, losses
+    winrate = round((wins / total) * 100, 2) if total > 0 else 0
 
-    winrate = round((wins / total) * 100, 2)
-    return winrate, wins, losses
-
+    return wins, losses, winrate
 # ================== Telegram ==================
 async def cmd_start(update, ctx):
     await update.message.reply_text(
@@ -565,7 +562,7 @@ async def auto_scan(ctx):
                 f"Hướng: {r['side']} | BOS: {r['bos']}\n"
                 f"Entry: {fmt(r['price'])}\n"
                 f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-                f"\n📊 Winrate: {winrate}% ({wins}W / {losses}L)"
+                f"\n📊 Winrate: {r['winrate']}% ({r['wins']}W / {r['losses']}L)"
             )
 
             for cid in chat_ids:

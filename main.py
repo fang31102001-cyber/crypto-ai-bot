@@ -384,10 +384,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     # ===== SMART MONEY LOGIC =====
 
-    sweep = detect_liquidity_sweep(df)
-
-    if sweep == "NO_SWEEP":
-        return {"skip": True, "reason": "No Sweep"}
+    if not manual:
+        sweep = detect_liquidity_sweep(df)
+        if sweep == "NO_SWEEP":
+            return {"skip": True, "reason": "No Sweep"}
 
     bos = detect_strong_bos(df)
     if bos == "NO_BOS":
@@ -401,14 +401,15 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     side = "LONG" if bos == "BOS_UP" else "SHORT"
 
     # ===== RETEST CONFIRM =====
-    if not break_retest_ok(df, side):
-        return {"skip": True, "reason": "No retest"}
+    if not manual:
+        if not break_retest_ok(df, side):
+            return {"skip": True, "reason": "No retest"}
         
     # ===== COOLDOWN =====
     if not manual and not cooldown_ok(base, side):
         return {"skip": True, "reason": "Cooldown"}
     # ===== VOLUME CONFIRM =====
-    if abs(row["vol_z"]) < 0.5:
+   if not manual and abs(row["vol_z"]) < 0.5:
         return {"skip": True, "reason": "Weak volume"}
     # ===== RSI FILTER =====
     rsi_val = row["rsi"]

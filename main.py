@@ -409,7 +409,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     if not manual and not cooldown_ok(base, side):
         return {"skip": True, "reason": "Cooldown"}
     # ===== VOLUME CONFIRM =====
-   if not manual and abs(row["vol_z"]) < 0.5:
+    if not manual and abs(row["vol_z"]) < 0.5:
         return {"skip": True, "reason": "Weak volume"}
     # ===== RSI FILTER =====
     rsi_val = row["rsi"]

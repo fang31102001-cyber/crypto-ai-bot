@@ -24,7 +24,7 @@ TZ                 = os.getenv("TZ", "Asia/Ho_Chi_Minh")
 TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
-SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "3600"))
+SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "900"))
 ALERT_THRESHOLD    = int(os.getenv("ALERT_THRESHOLD", "80"))
 MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.3"))
 
@@ -40,7 +40,7 @@ CHAT_IDS = [
 ]
 LAST_SIGNAL_TIME = {}
 LAST_BAR_SIGNAL = {}
-COOLDOWN_MINUTES = 5
+COOLDOWN_MINUTES = 30
 
 
 DATA_DIR = "data"
@@ -193,25 +193,40 @@ def detect_bos(df: pd.DataFrame, lookback: int = 8) -> str:
     return "NO_BOS"
 
 
-def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float = 0.004) -> bool:
+def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float = 0.01) -> bool:
+
+    last = df.iloc[-1]
+
     high = df["high"]
     low = df["low"]
 
     swing_high = high.rolling(lookback).max()
     swing_low = low.rolling(lookback).min()
 
-    last_close = df["close"].iloc[-1]
+    close = last["close"]
+    openp = last["open"]
+    highp = last["high"]
+    lowp = last["low"]
 
     if side == "LONG":
+
         level = swing_high.iloc[-2]
-        return abs(last_close - level) / level <= tol
+
+        near = abs(close - level) / level <= tol
+        wick = lowp < level and close > level
+
+        return near or wick
 
     if side == "SHORT":
+
         level = swing_low.iloc[-2]
-        return abs(last_close - level) / level <= tol
+
+        near = abs(close - level) / level <= tol
+        wick = highp > level and close < level
+
+        return near or wick
 
     return False
-
 def detect_strong_bos(df: pd.DataFrame, lookback: int = 12) -> str:
     if len(df) < lookback + 2:
         return "NO_BOS"
@@ -259,8 +274,8 @@ def detect_liquidity_sweep(df: pd.DataFrame, lookback: int = 20) -> str:
     prev_high = swing_high.iloc[-3]
     prev_low = swing_low.iloc[-3]
 
-    last_high = high.iloc[-2]
-    last_low = low.iloc[-2]
+    last_high = high.iloc[-1]
+    last_low = low.iloc[-1]
     last_close = df["close"].iloc[-1]
 
     # Sweep đáy rồi bật lên
@@ -353,14 +368,18 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
 
 # ================== Analysis ==================
 def dynamic_atr_threshold(atr_ratio: float) -> float:
+
     if atr_ratio >= 0.01:
-        return 0.002     # market rất mạnh
-    elif atr_ratio >= 0.006:
         return 0.0015
+
+    elif atr_ratio >= 0.006:
+        return 0.001
+
     elif atr_ratio >= 0.003:
-        return 0.0012
+        return 0.0008
+
     else:
-        return 0.001     # market yếu
+        return 0.0005
 
 def analyze(base: str, tf: str, manual=False) -> dict:
     # ===== TIME FILTER (07h-22h VN) =====
@@ -382,24 +401,41 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     if not manual and atr_ratio < min_atr:
         return {"skip": True, "reason": "ATR too low"}
 
-    # ===== SMART MONEY LOGIC =====
 
-    if not manual:
-        sweep = detect_liquidity_sweep(df)
-        if sweep == "NO_SWEEP":
-            return {"skip": True, "reason": "No Sweep"}
+    sweep = detect_liquidity_sweep(df)
+    log.info(f"{base} SWEEP={sweep}")
 
     bos = detect_strong_bos(df)
+
     if bos == "NO_BOS":
         bos = detect_bos(df)
 
     if bos == "NO_BOS":
-        return {"skip": True, "reason": "No BOS after sweep"}
-
+        return {"skip": True, "reason": "No market structure"}
 
     # Xác định hướng trade
     side = "LONG" if bos == "BOS_UP" else "SHORT"
 
+    # Trend continuation filter
+    if side == "LONG" and row["ema12"] < row["ema26"]:
+        return {"skip": True, "reason": "Weak bullish momentum"}
+
+    if side == "SHORT" and row["ema12"] > row["ema26"]:
+        return {"skip": True, "reason": "Weak bearish momentum"}
+    # ===== HTF TREND FILTER =====
+    trend = get_htf_trend(base)
+
+    if side == "LONG" and trend != "UP":
+        return {"skip": True, "reason": "Against HTF trend"}
+
+    if side == "SHORT" and trend != "DOWN":
+        return {"skip": True, "reason": "Against HTF trend"}
+    # EMA trend filter
+    if side == "LONG" and row["close"] < row["ema50"]:
+        return {"skip": True, "reason": "Below EMA50"}
+
+    if side == "SHORT" and row["close"] > row["ema50"]:
+        return {"skip": True, "reason": "Above EMA50"}
     # ===== RETEST CONFIRM =====
     if not manual:
         if not break_retest_ok(df, side):
@@ -409,22 +445,47 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     if not manual and not cooldown_ok(base, side):
         return {"skip": True, "reason": "Cooldown"}
     # ===== VOLUME CONFIRM =====
-    if not manual and abs(row["vol_z"]) < 0.5:
+    if not manual and abs(row["vol_z"]) < MIN_VOLZ:
         return {"skip": True, "reason": "Weak volume"}
     # ===== RSI FILTER =====
     rsi_val = row["rsi"]
 
-    if side == "LONG" and rsi_val > 70:
+    if side == "LONG" and rsi_val > 80:
         return {"skip": True, "reason": "RSI overbought"}
 
-    if side == "SHORT" and rsi_val < 30:
+    if side == "SHORT" and rsi_val < 20:
         return {"skip": True, "reason": "RSI oversold"}
+    # ===== SIGNAL SCORE =====
+    score = 0
 
+    if bos != "NO_BOS":
+        score += 30
+
+    if sweep != "NO_SWEEP":
+        score += 20
+
+    if abs(row["vol_z"]) > MIN_VOLZ:
+        score += 20
+
+    if side == "LONG" and row["close"] > row["ema50"]:
+        score += 20
+
+    if side == "SHORT" and row["close"] < row["ema50"]:
+        score += 20
+
+    if 30 < row["rsi"] < 70:
+        score += 10
+
+    if score < 55:
+        return {"skip": True, "reason": f"Low score {score}"}
+        
+    log.info(f"SIGNAL {base} {side} SCORE={score} BOS={bos}")
+    
     # 3. TP / SL theo ATR
     entry = float(row["close"])
     atrv = float(row["atr"])
-    tp = entry + (2.0 * atrv if side == "LONG" else -2.0 * atrv)
-    sl = entry - (1.0 * atrv if side == "LONG" else -1.0 * atrv)
+    tp = entry + (2.5 * atrv if side == "LONG" else -2.5 * atrv)
+    sl = entry - (1.2 * atrv if side == "LONG" else -1.2 * atrv)
 
     # 4. Lưu trade để theo dõi WIN / LOSE
     trade = {
@@ -508,6 +569,7 @@ def calculate_winrate():
     winrate = round((wins / total) * 100, 2) if total > 0 else 0
 
     return wins, losses, winrate
+   
 # ================== Telegram ==================
 async def cmd_start(update, ctx):
     await update.message.reply_text(
@@ -548,8 +610,26 @@ async def auto_scan(ctx):
     chat_ids = ctx.job.data["chat_ids"]
     update_trades_and_learn()
 
-    top = ["BTC","ETH","SOL","WLD","XRP","TON","ARB","LINK","PEPE","SUI"]
+    markets = EX.load_markets()
 
+    top = []
+    volumes = {}
+
+    for s, m in markets.items():
+
+        if "/USDT:USDT" in s and m["active"]:
+
+            base = s.split("/")[0]
+
+            if base not in ["USDC","USDT","USDP","TUSD","BUSD"]:
+                ticker = EX.fetch_ticker(s)
+                volumes[base] = ticker["quoteVolume"]
+        
+    sorted_coins = sorted(volumes, key=volumes.get, reverse=True)
+
+    top = sorted_coins[:40]
+
+    random.shuffle(top)
     for coin in top:
         try:
             r = analyze(coin, TIMEFRAME_DEFAULT, manual=False)

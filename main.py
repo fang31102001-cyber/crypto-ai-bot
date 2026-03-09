@@ -26,7 +26,7 @@ TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
 SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "900"))
 ALERT_THRESHOLD    = int(os.getenv("ALERT_THRESHOLD", "80"))
-MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.3"))
+MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.2"))
 
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
 QUOTE              = os.getenv("QUOTE", "USDT").upper()
@@ -193,7 +193,7 @@ def detect_bos(df: pd.DataFrame, lookback: int = 8) -> str:
     return "NO_BOS"
 
 
-def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 20, tol: float = 0.01) -> bool:
+def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 15, tol: float = 0.02) -> bool:
 
     last = df.iloc[-1]
 
@@ -476,7 +476,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     if 30 < row["rsi"] < 70:
         score += 10
 
-    if score < 55:
+    if score < 50:
         return {"skip": True, "reason": f"Low score {score}"}
         
     log.info(f"SIGNAL {base} {side} SCORE={score} BOS={bos}")
@@ -612,7 +612,6 @@ async def auto_scan(ctx):
 
     markets = EX.load_markets()
 
-    top = []
     volumes = {}
 
     for s, m in markets.items():
@@ -624,6 +623,10 @@ async def auto_scan(ctx):
             if base not in ["USDC","USDT","USDP","TUSD","BUSD"]:
                 ticker = EX.fetch_ticker(s)
                 volumes[base] = ticker["quoteVolume"]
+                if vol is None:
+                    continue
+
+                volumes[base] = vol
         
     sorted_coins = sorted(volumes, key=volumes.get, reverse=True)
 

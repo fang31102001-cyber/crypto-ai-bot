@@ -1,12 +1,11 @@
 # main.py
-import os, math, json, time, random, logging
+import os, json, time, random, logging
 from threading import Thread
 from datetime import datetime, timedelta
 from typing import Tuple
 
 import ccxt
 import pandas as pd
-import numpy as np
 import pytz
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.error import Conflict
@@ -25,8 +24,7 @@ TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
 SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "900"))
-ALERT_THRESHOLD    = int(os.getenv("ALERT_THRESHOLD", "80"))
-MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.2"))
+MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.15"))
 
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
 QUOTE              = os.getenv("QUOTE", "USDT").upper()
@@ -92,30 +90,21 @@ def cooldown_ok(symbol: str, side: str) -> bool:
     return (now - last) > COOLDOWN_MINUTES * 60
 
         
-def in_trading_hours(
-    start_hour: int = 7,
-    end_hour: int = 22,
-    tz_name: str = "Asia/Ho_Chi_Minh"
-) -> bool:
-    """
-    Kiểm tra có đang trong giờ trade hay không
-    Mặc định: 07:00 -> 22:00 giờ VN
-    """
+def in_trading_hours(start_hour=7, end_hour=22, tz_name="Asia/Ho_Chi_Minh"):
     try:
-        import pytz
         tz = pytz.timezone(tz_name)
         now = datetime.now(tz)
     except Exception:
         now = datetime.now()
 
-    hour = now.hour
-    return start_hour <= hour < end_hour
+    return start_hour <= now.hour < end_hour
 
 
 # ================== CCXT (MEXC Swap) ==================
 EX = ccxt.mexc({
     "options": {"defaultType": MARKET_TYPE},
     "enableRateLimit": True,
+    "timeout": 30000
 })
 
 def symbol_usdt_perp(base: str) -> str:
@@ -170,6 +159,53 @@ def atr(df, n=14):
     pc = c.shift(1)
     tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
+    
+def strong_breakout_candle(df):
+
+    last = df.iloc[-1]
+
+    body = abs(last["close"] - last["open"])
+    candle_range = last["high"] - last["low"]
+
+    if candle_range == 0:
+        return False
+
+    body_ratio = body / candle_range
+
+    if body_ratio > 0.6:
+        return True
+
+    return False
+def detect_compression(df):
+
+    # cần đủ dữ liệu
+    if len(df) < 30:
+        return False
+
+    atr_now = df["atr"].iloc[-1]
+    atr_avg = df["atr"].rolling(20).mean().iloc[-1]
+
+    ema_spread = abs(df["ema12"].iloc[-1] - df["ema26"].iloc[-1]) / df["close"].iloc[-1]
+
+    # volatility thấp + EMA siết
+    if atr_now < atr_avg * 0.7 and ema_spread < 0.002:
+        return True
+
+    return False
+def detect_breakout(df):
+
+    high = df["high"].rolling(20).max().iloc[-2]
+    low = df["low"].rolling(20).min().iloc[-2]
+
+    close = df["close"].iloc[-1]
+
+    if close > high:
+        return "LONG"
+
+    if close < low:
+        return "SHORT"
+
+    return None
 
 # ================== Market Structure ==================
 def detect_bos(df: pd.DataFrame, lookback: int = 8) -> str:
@@ -193,7 +229,7 @@ def detect_bos(df: pd.DataFrame, lookback: int = 8) -> str:
     return "NO_BOS"
 
 
-def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 15, tol: float = 0.02) -> bool:
+def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 15, tol: float = 0.03) -> bool:
 
     last = df.iloc[-1]
 
@@ -288,19 +324,49 @@ def detect_liquidity_sweep(df: pd.DataFrame, lookback: int = 20) -> str:
 
     return "NO_SWEEP"
 
-def ema_pullback_ok(row: dict, side: str, tol: float = 0.003) -> bool:
-    price = row["close"]
-    ema50 = row["ema50"]
+def detect_liquidity_grab(df):
 
-    if side == "LONG":
-        return price >= ema50 and abs(price - ema50) / ema50 <= tol
+    if len(df) < 10:
+        return None
 
-    if side == "SHORT":
-        return price <= ema50 and abs(price - ema50) / ema50 <= tol
+    prev = df.iloc[-2]
+    last = df.iloc[-1]
 
-    return False
+    # grab phía dưới (bullish)
+    if last["low"] < prev["low"] and last["close"] > prev["low"]:
+        return "LONG"
 
+    # grab phía trên (bearish)
+    if last["high"] > prev["high"] and last["close"] < prev["high"]:
+        return "SHORT"
 
+    return None
+    
+def detect_order_block(df):
+
+    if len(df) < 10:
+        return None
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    body = abs(prev["close"] - prev["open"])
+    candle_range = prev["high"] - prev["low"]
+
+    # strong bullish candle trước đó
+    if prev["close"] > prev["open"] and body > candle_range * 0.6:
+
+        # giá hiện tại retest vùng đó
+        if last["low"] <= prev["close"] <= last["high"]:
+            return "LONG"
+
+    # strong bearish candle
+    if prev["close"] < prev["open"] and body > candle_range * 0.6:
+
+        if last["low"] <= prev["open"] <= last["high"]:
+            return "SHORT"
+
+    return None
 
 # ================== Candlestick patterns ==================
 def detect_pattern(df: pd.DataFrame) -> str:
@@ -382,13 +448,15 @@ def dynamic_atr_threshold(atr_ratio: float) -> float:
         return 0.0005
 
 def analyze(base: str, tf: str, manual=False) -> dict:
-    # ===== TIME FILTER (07h-22h VN) =====
+
     if not in_trading_hours(7, 22, TZ):
         return {"skip": True, "reason": "Out of trading hours (07-22)"}
-        
+
     df = enrich(fetch_ohlcv(base, tf, limit=300))
+
     row = df.iloc[-1].to_dict()
     last_bar = df["ts"].iloc[-1]
+
     if not manual and LAST_BAR_SIGNAL.get(base) == last_bar:
         return {"skip": True, "reason": "Duplicate candle"}
 
@@ -396,26 +464,38 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     atr_ratio = row["atr"] / row["close"]
 
     min_atr = dynamic_atr_threshold(atr_ratio)
-    log.info(f"{base} ATR={atr_ratio:.5f} MIN_ATR={min_atr}")
 
     if not manual and atr_ratio < min_atr:
         return {"skip": True, "reason": "ATR too low"}
 
+    # ===== EARLY BREAKOUT DETECTOR =====
+    compression = detect_compression(df)
+
+    if compression:
+        breakout = detect_breakout(df)
+
+        if breakout:
+            side = breakout
 
     sweep = detect_liquidity_sweep(df)
+    grab = detect_liquidity_grab(df)
+    order_block = detect_order_block(df)
     log.info(f"{base} SWEEP={sweep}")
 
     bos = detect_strong_bos(df)
+    if bos != "NO_BOS" and not strong_breakout_candle(df):
+        return {"skip": True, "reason": "Weak breakout candle"}
 
     if bos == "NO_BOS":
         bos = detect_bos(df)
 
-    if bos == "NO_BOS":
-        return {"skip": True, "reason": "No market structure"}
+    # ===== nếu có breakout sớm thì dùng nó =====
+    if 'side' not in locals():
 
-    # Xác định hướng trade
-    side = "LONG" if bos == "BOS_UP" else "SHORT"
+        if bos == "NO_BOS":
+            return {"skip": True, "reason": "No market structure"}
 
+        side = "LONG" if bos == "BOS_UP" else "SHORT"
     # Trend continuation filter
     if side == "LONG" and row["ema12"] < row["ema26"]:
         return {"skip": True, "reason": "Weak bullish momentum"}
@@ -457,6 +537,11 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         return {"skip": True, "reason": "RSI oversold"}
     # ===== SIGNAL SCORE =====
     score = 0
+    if grab == side:
+        score += 15
+    
+    if order_block == side:
+        score += 20
 
     if bos != "NO_BOS":
         score += 30
@@ -610,27 +695,32 @@ async def auto_scan(ctx):
     chat_ids = ctx.job.data["chat_ids"]
     update_trades_and_learn()
 
-    markets = EX.load_markets()
-
+    try:
+        tickers = EX.fetch_tickers()
+    except Exception as e:
+        log.warning(f"fetch_tickers error: {e}")
+        return
     volumes = {}
 
-    for s, m in markets.items():
+    for s, t in tickers.items():
 
-        if "/USDT:USDT" in s and m["active"]:
+        if "/USDT:USDT" not in s:
+            continue
 
-            base = s.split("/")[0]
+        base = s.split("/")[0]
 
-            if base not in ["USDC","USDT","USDP","TUSD","BUSD"]:
-                ticker = EX.fetch_ticker(s)
-                volumes[base] = ticker["quoteVolume"]
-                if vol is None:
-                    continue
+        if base in ["USDC","USDT","USDP","TUSD","BUSD"]:
+            continue
 
-                volumes[base] = vol
+        vol = t.get("quoteVolume")
+
+        if vol:
+            volumes[base] = vol
         
     sorted_coins = sorted(volumes, key=volumes.get, reverse=True)
 
     top = sorted_coins[:40]
+    log.info(f"Scanning coins: {top}")
 
     random.shuffle(top)
     for coin in top:

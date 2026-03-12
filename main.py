@@ -44,17 +44,6 @@ COOLDOWN_MINUTES = 30
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-TRADES_PATH  = os.path.join(DATA_DIR, "trades.json")
-PENDING_PATH = os.path.join(DATA_DIR, "pending.json")
-
-if not os.path.exists(TRADES_PATH):
-    with open(TRADES_PATH, "w", encoding="utf-8") as f:
-        json.dump([], f)
-
-if not os.path.exists(PENDING_PATH):
-    with open(PENDING_PATH, "w", encoding="utf-8") as f:
-        json.dump({}, f)
-
 
 # ================== KEEP ALIVE ==================
 def start_keep_alive():
@@ -192,6 +181,52 @@ def detect_compression(df):
         return True
 
     return False
+def detect_accumulation(df):
+
+    if len(df) < 30:
+        return False
+
+    recent = df.tail(20)
+
+    high = recent["high"].max()
+    low = recent["low"].min()
+
+    range_ratio = (high - low) / low
+
+    avg_vol = recent["volume"].mean()
+    last_vol = df["volume"].iloc[-1]
+
+    # giá nén + volume tăng
+    if range_ratio < 0.04 and last_vol > avg_vol * 1.2:
+        return True
+
+    return False
+    
+def detect_volume_accumulation(df):
+
+    if len(df) < 40:
+        return False
+
+    recent = df.tail(30)
+
+    # giá biến động nhỏ
+    price_range = (recent["high"].max() - recent["low"].min()) / recent["low"].min()
+
+    # volume đang tăng
+    vol_old = recent["volume"].iloc[:15].mean()
+    vol_new = recent["volume"].iloc[15:].mean()
+
+    # ATR vẫn thấp
+    atr_recent = recent["atr"].mean()
+    price = recent["close"].iloc[-1]
+
+    atr_ratio = atr_recent / price
+
+    if price_range < 0.05 and vol_new > vol_old * 1.3 and atr_ratio < 0.01:
+        return True
+
+    return False
+    
 def detect_breakout(df):
 
     high = df["high"].rolling(20).max().iloc[-2]
@@ -367,7 +402,48 @@ def detect_order_block(df):
             return "SHORT"
 
     return None
+    
+def detect_whale_flow(symbol):
 
+    try:
+        ob = EX.fetch_order_book(symbol, limit=20)
+
+        bid_volume = sum([b[1] for b in ob["bids"][:5]])
+        ask_volume = sum([a[1] for a in ob["asks"][:5]])
+
+        # lực mua lớn
+        if bid_volume > ask_volume * 1.4:
+            return "LONG"
+
+        # lực bán lớn
+        if ask_volume > bid_volume * 1.4:
+            return "SHORT"
+
+        return None
+
+    except:
+        return None
+def detect_liquidity_vacuum(symbol):
+
+    try:
+        ob = EX.fetch_order_book(symbol, limit=20)
+
+        bid_total = sum([b[1] for b in ob["bids"][:10]])
+        ask_total = sum([a[1] for a in ob["asks"][:10]])
+
+        spread = ob["asks"][0][0] - ob["bids"][0][0]
+
+        # thanh khoản mỏng
+        if bid_total < ask_total * 0.7 or ask_total < bid_total * 0.7:
+
+            # spread rộng
+            if spread / ob["bids"][0][0] > 0.001:
+                return True
+
+        return False
+
+    except:
+        return False
 # ================== Candlestick patterns ==================
 def detect_pattern(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
@@ -470,6 +546,8 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     # ===== EARLY BREAKOUT DETECTOR =====
     compression = detect_compression(df)
+    accumulation = detect_accumulation(df)
+    volume_accum = detect_volume_accumulation(df)
 
     if compression:
         breakout = detect_breakout(df)
@@ -481,6 +559,8 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     grab = detect_liquidity_grab(df)
     order_block = detect_order_block(df)
     log.info(f"{base} SWEEP={sweep}")
+    whale = detect_whale_flow(symbol_usdt_perp(base))
+    vacuum = detect_liquidity_vacuum(symbol_usdt_perp(base))
 
     bos = detect_strong_bos(df)
     if bos != "NO_BOS" and not strong_breakout_candle(df):
@@ -537,9 +617,28 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         return {"skip": True, "reason": "RSI oversold"}
     # ===== SIGNAL SCORE =====
     score = 0
+    pump_score = 0
+    # ===== EARLY PUMP SIGNAL =====
+    if volume_accum:
+        score += 30
+        pump_score += 25
+
+    if vacuum:
+        score += 30
+        pump_score += 20
+
+    if accumulation:
+        score += 25
+        pump_score += 20
+
+    if whale == side:
+        score += 25
+        pump_score += 20
+
+    # ===== SMART MONEY STRUCTURE =====
     if grab == side:
         score += 15
-    
+
     if order_block == side:
         score += 20
 
@@ -549,8 +648,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     if sweep != "NO_SWEEP":
         score += 20
 
+    # ===== MOMENTUM =====
     if abs(row["vol_z"]) > MIN_VOLZ:
         score += 20
+        pump_score += 15
 
     if side == "LONG" and row["close"] > row["ema50"]:
         score += 20
@@ -563,8 +664,9 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     if score < 50:
         return {"skip": True, "reason": f"Low score {score}"}
+    
         
-    log.info(f"SIGNAL {base} {side} SCORE={score} BOS={bos}")
+    log.info(f"SIGNAL {base} {side} SCORE={score} PUMP={pump_score} BOS={bos}")
     
     # 3. TP / SL theo ATR
     entry = float(row["close"])
@@ -572,27 +674,8 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     tp = entry + (2.5 * atrv if side == "LONG" else -2.5 * atrv)
     sl = entry - (1.2 * atrv if side == "LONG" else -1.2 * atrv)
 
-    # 4. Lưu trade để theo dõi WIN / LOSE
-    trade = {
-        "time": datetime.utcnow().isoformat(),
-        "base": base,
-        "tf": tf,
-        "side": side,
-        "entry": entry,
-        "tp": tp,
-        "sl": sl,
-        "status": "OPEN"
-    }
-
-    with open(TRADES_PATH, "r+", encoding="utf-8") as f:
-        trades = json.load(f)
-        trades.append(trade)
-        f.seek(0)
-        json.dump(trades, f, indent=2)
     LAST_SIGNAL_TIME[f"{base}_{side}"] = time.time()
     LAST_BAR_SIGNAL[base] = df["ts"].iloc[-1]
-
-    wins, losses, winrate = calculate_winrate()
 
     return {
         "base": base.upper(),
@@ -602,58 +685,9 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         "tp": tp,
         "sl": sl,
         "bos": bos,
-        "wins": wins,
-        "losses": losses,
-        "winrate": winrate
+        "pump_score": pump_score
     }
-def update_trades_and_learn():
-    with open(TRADES_PATH, "r+", encoding="utf-8") as f:
-        trades = json.load(f)
 
-    changed = False
-
-    for t in trades:
-        if t["status"] != "OPEN":
-            continue
-
-        df = fetch_ohlcv(t["base"], t["tf"], limit=5)
-        high = df["high"].iloc[-1]
-        low = df["low"].iloc[-1]
-
-        if t["side"] == "LONG":
-            if high >= t["tp"]:
-                t["status"] = "WIN"
-                changed = True
-            elif low <= t["sl"]:
-                t["status"] = "LOSE"
-                changed = True
-
-        if t["side"] == "SHORT":
-            if low <= t["tp"]:
-                t["status"] = "WIN"
-                changed = True
-            elif high >= t["sl"]:
-                t["status"] = "LOSE"
-                changed = True
-
-    if changed:
-        with open(TRADES_PATH, "w", encoding="utf-8") as f:
-            json.dump(trades, f, indent=2)
-
-def calculate_winrate():
-    try:
-        with open(TRADES_PATH, "r", encoding="utf-8") as f:
-            trades = json.load(f)
-    except:
-        return 0, 0, 0
-
-    wins = sum(1 for t in trades if t.get("status") == "WIN")
-    losses = sum(1 for t in trades if t.get("status") == "LOSE")
-
-    total = wins + losses
-    winrate = round((wins / total) * 100, 2) if total > 0 else 0
-
-    return wins, losses, winrate
    
 # ================== Telegram ==================
 async def cmd_start(update, ctx):
@@ -666,7 +700,6 @@ async def cmd_start(update, ctx):
 async def handle_text(update, ctx):
     text = (update.message.text or "").strip()
     try:
-        update_trades_and_learn()
         base, tf = parse_symbol_tf(text, TIMEFRAME_DEFAULT)
         r = analyze(base, tf, manual=True)
 
@@ -679,7 +712,6 @@ async def handle_text(update, ctx):
             f"Hướng: {r['side']} | BOS: {r['bos']}\n"
             f"Entry: {fmt(r['price'])}\n"
             f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-            f"📊 {r['base']} ({r['tf']})\n"
         )
         await update.message.reply_text(msg)
 
@@ -688,18 +720,18 @@ async def handle_text(update, ctx):
 
 # ================== Auto scan ==================
 async def auto_scan(ctx):
-    # ===== TIME FILTER (07h-22h VN) =====
+
     if not in_trading_hours(7, 22, TZ):
         return
 
     chat_ids = ctx.job.data["chat_ids"]
-    update_trades_and_learn()
 
     try:
         tickers = EX.fetch_tickers()
     except Exception as e:
         log.warning(f"fetch_tickers error: {e}")
         return
+
     volumes = {}
 
     for s, t in tickers.items():
@@ -716,38 +748,59 @@ async def auto_scan(ctx):
 
         if vol:
             volumes[base] = vol
-        
+
     sorted_coins = sorted(volumes, key=volumes.get, reverse=True)
 
     top = sorted_coins[:40]
+
     log.info(f"Scanning coins: {top}")
 
+    signals = []
+
     random.shuffle(top)
+
     for coin in top:
+
         try:
+
             r = analyze(coin, TIMEFRAME_DEFAULT, manual=False)
 
             if r.get("skip"):
                 log.info(f"{coin} skip: {r['reason']}")
                 continue
 
-            msg = (
-                f"🔥 Tín hiệu mạnh — {r['base']}/USDT ({r['tf']})\n"
-                f"Hướng: {r['side']} | BOS: {r['bos']}\n"
-                f"Entry: {fmt(r['price'])}\n"
-                f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-                f"\n📊 Winrate: {r['winrate']}% ({r['wins']}W / {r['losses']}L)"
-            )
-
-            for cid in chat_ids:
-                await ctx.application.bot.send_message(
-                    chat_id=cid,
-                    text=msg
-                )
+            signals.append(r)
 
         except Exception as e:
             log.warning("scan fail %s: %r", coin, e)
 
+    if not signals:
+        return
+
+    # sắp xếp tín hiệu theo winrate
+    signals = sorted(
+        signals,
+        key=lambda x: x["pump_score"],
+        reverse=True
+    )
+
+    # chỉ gửi 3 tín hiệu mạnh nhất
+    signals = signals[:3]
+
+    for r in signals:
+
+        msg = (
+            f"🔥 Tín hiệu mạnh — {r['base']}/USDT ({r['tf']})\n"
+            f"Hướng: {r['side']} | BOS: {r['bos']}\n"
+            f"Entry: {fmt(r['price'])}\n"
+            f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
+        )
+
+        for cid in chat_ids:
+            await ctx.application.bot.send_message(
+                chat_id=cid,
+                text=msg
+            )
 
 # ================== Run ==================
 def _seconds_to_next_hour(tz_name: str) -> int:

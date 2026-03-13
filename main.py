@@ -93,6 +93,13 @@ def symbol_usdt_perp(base: str) -> str:
 def ema(s, n): 
     return s.ewm(span=n, adjust=False).mean()
     
+def ema_slope(series, length=3):
+
+    if len(series) < length + 1:
+        return 0
+
+    return series.iloc[-1] - series.iloc[-length]
+    
 def get_htf_trend(base: str) -> str:
     """
     Xác định xu hướng khung 1H để lọc trade 15m
@@ -299,6 +306,30 @@ def detect_volatility_expansion(df):
 
     return False
     
+def detect_pre_pump(df):
+
+    if len(df) < 20:
+        return False
+
+    recent = df.tail(10)
+
+    # volume tăng dần
+    vol_trend = recent["volume"].iloc[-1] > recent["volume"].iloc[-5]
+
+    # ATR đang tăng
+    atr_now = df["atr"].iloc[-1]
+    atr_prev = df["atr"].iloc[-5]
+
+    atr_expand = atr_now > atr_prev * 1.15
+
+    # giá chưa chạy nhiều
+    move = abs(df["close"].iloc[-1] - df["close"].iloc[-5]) / df["close"].iloc[-5]
+
+    if vol_trend and atr_expand and move < 0.02:
+        return True
+
+    return False
+    
 def detect_breakout(df):
 
     high = df["high"].rolling(20).max().iloc[-2]
@@ -479,6 +510,9 @@ def detect_whale_flow(ob):
 
     try:
 
+        if not ob["bids"] or not ob["asks"]:
+            return None
+
         bid_volume = sum([b[1] for b in ob["bids"][:5]])
         ask_volume = sum([a[1] for a in ob["asks"][:5]])
 
@@ -518,6 +552,9 @@ def detect_liquidity_pressure(ob):
 
         bids = ob["bids"][:10]
         asks = ob["asks"][:10]
+
+        if not bids or not asks:
+            return None
 
         bid_volume = sum([b[1] for b in bids])
         ask_volume = sum([a[1] for a in asks])
@@ -646,7 +683,8 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     momentum = detect_momentum_expansion(df)
     vol_trend = detect_volume_trend(df)
     vol_expand = detect_volatility_expansion(df)
-
+    pre_pump = detect_pre_pump(df)
+    
     if compression:
         breakout = detect_breakout(df)
 
@@ -659,8 +697,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     log.info(f"{base} SWEEP={sweep}")
     symbol = symbol_usdt_perp(base)
 
-    orderbook = EX.fetch_order_book(symbol, limit=20)
-
+    try:
+        orderbook = EX.fetch_order_book(symbol, limit=20)
+    except Exception:
+        orderbook = {"bids": [], "asks": []}
     whale = detect_whale_flow(orderbook)
     vacuum = detect_liquidity_vacuum(orderbook)
     pressure = detect_liquidity_pressure(orderbook)
@@ -687,6 +727,16 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     if side == "SHORT" and row["ema12"] > row["ema26"]:
         return {"skip": True, "reason": "Weak bearish momentum"}
+
+    ema12_slope = ema_slope(df["ema12"])
+    ema26_slope = ema_slope(df["ema26"])
+
+    if side == "LONG" and ema12_slope <= 0:
+        return {"skip": True, "reason": "EMA slope weak"}
+
+    if side == "SHORT" and ema12_slope >= 0:
+        return {"skip": True, "reason": "EMA slope weak"}
+        
     # ===== HTF TREND FILTER =====
     trend = get_htf_trend(base)
 
@@ -725,6 +775,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     score = 0
     pump_score = 0
     # ===== EARLY PUMP SIGNAL =====
+    if pre_pump:
+        score += 25
+        pump_score += 30
+        
     if true_break:
         score += 25
         pump_score += 20

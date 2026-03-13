@@ -7,7 +7,7 @@ from typing import Tuple
 import ccxt
 import pandas as pd
 import pytz
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler
 from telegram.error import Conflict
 
 # ================== LOGGING ==================
@@ -24,7 +24,7 @@ TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
 SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "900"))
-MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.15"))
+MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.1"))
 
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
 QUOTE              = os.getenv("QUOTE", "USDT").upper()
@@ -56,16 +56,6 @@ def start_keep_alive():
 
 # ================== Helpers ==================
 VALID_TF = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","12h","1d"}
-
-def parse_symbol_tf(text: str, default_tf: str) -> Tuple[str, str]:
-    parts = (text or "").strip().lower().split()
-    if not parts:
-        raise ValueError("Bạn chưa nhập coin.")
-    base = parts[0].upper()
-    tf = default_tf
-    if len(parts) > 1 and parts[1].lower() in VALID_TF:
-        tf = parts[1].lower()
-    return base, tf
 
 def fmt(x, nd=6):
     try:
@@ -165,6 +155,27 @@ def strong_breakout_candle(df):
         return True
 
     return False
+    
+def detect_true_breakout(df):
+
+    last = df.iloc[-1]
+
+    body = abs(last["close"] - last["open"])
+    rng = last["high"] - last["low"]
+
+    if rng == 0:
+        return False
+
+    body_ratio = body / rng
+
+    vol = last["volume"]
+    vol_ma = df["volume"].rolling(20).mean().iloc[-2]
+
+    if body_ratio > 0.6 and vol > vol_ma * 1.3:
+        return True
+
+    return False
+    
 def detect_compression(df):
 
     # cần đủ dữ liệu
@@ -223,6 +234,67 @@ def detect_volume_accumulation(df):
     atr_ratio = atr_recent / price
 
     if price_range < 0.05 and vol_new > vol_old * 1.3 and atr_ratio < 0.01:
+        return True
+
+    return False
+    
+def detect_absorption(df):
+
+    if len(df) < 20:
+        return False
+
+    recent = df.tail(10)
+
+    price_range = (recent["high"].max() - recent["low"].min()) / recent["close"].iloc[-1]
+
+    vol_mean = recent["volume"].mean()
+    vol_last = recent["volume"].iloc[-1]
+
+    # volume lớn nhưng giá không đi
+    if price_range < 0.01 and vol_last > vol_mean * 1.5:
+        return True
+
+    return False
+def detect_momentum_expansion(df):
+
+    if len(df) < 20:
+        return False
+
+    atr_now = df["atr"].iloc[-1]
+    atr_old = df["atr"].iloc[-10]
+
+    if atr_now > atr_old * 1.3:
+        return True
+
+    return False
+
+
+def detect_volume_trend(df):
+
+    if len(df) < 15:
+        return False
+
+    vols = df["volume"].tail(5)
+
+    if vols.is_monotonic_increasing:
+        return True
+
+    return False
+def detect_volatility_expansion(df):
+
+    if len(df) < 20:
+        return False
+
+    atr_now = df["atr"].iloc[-1]
+    atr_prev = df["atr"].iloc[-5]
+
+    vol_now = df["volume"].iloc[-1]
+    vol_ma = df["volume"].rolling(20).mean().iloc[-2]
+
+    price_move = abs(df["close"].iloc[-1] - df["close"].iloc[-5]) / df["close"].iloc[-5]
+
+    # ATR đang mở rộng + volume tăng + giá chưa chạy nhiều
+    if atr_now > atr_prev * 1.25 and vol_now > vol_ma * 1.2 and price_move < 0.03:
         return True
 
     return False
@@ -403,19 +475,16 @@ def detect_order_block(df):
 
     return None
     
-def detect_whale_flow(symbol):
+def detect_whale_flow(ob):
 
     try:
-        ob = EX.fetch_order_book(symbol, limit=20)
 
         bid_volume = sum([b[1] for b in ob["bids"][:5]])
         ask_volume = sum([a[1] for a in ob["asks"][:5]])
 
-        # lực mua lớn
         if bid_volume > ask_volume * 1.4:
             return "LONG"
 
-        # lực bán lớn
         if ask_volume > bid_volume * 1.4:
             return "SHORT"
 
@@ -423,20 +492,18 @@ def detect_whale_flow(symbol):
 
     except:
         return None
-def detect_liquidity_vacuum(symbol):
+        
+def detect_liquidity_vacuum(ob):
 
     try:
-        ob = EX.fetch_order_book(symbol, limit=20)
 
         bid_total = sum([b[1] for b in ob["bids"][:10]])
         ask_total = sum([a[1] for a in ob["asks"][:10]])
 
         spread = ob["asks"][0][0] - ob["bids"][0][0]
 
-        # thanh khoản mỏng
         if bid_total < ask_total * 0.7 or ask_total < bid_total * 0.7:
 
-            # spread rộng
             if spread / ob["bids"][0][0] > 0.001:
                 return True
 
@@ -444,6 +511,32 @@ def detect_liquidity_vacuum(symbol):
 
     except:
         return False
+        
+def detect_liquidity_pressure(ob):
+
+    try:
+
+        bids = ob["bids"][:10]
+        asks = ob["asks"][:10]
+
+        bid_volume = sum([b[1] for b in bids])
+        ask_volume = sum([a[1] for a in asks])
+
+        best_bid = bids[0][0]
+        best_ask = asks[0][0]
+
+        spread = best_ask - best_bid
+
+        if bid_volume > ask_volume * 1.6 and spread / best_bid < 0.0008:
+            return "LONG"
+
+        if ask_volume > bid_volume * 1.6 and spread / best_bid < 0.0008:
+            return "SHORT"
+
+        return None
+
+    except:
+        return None
 # ================== Candlestick patterns ==================
 def detect_pattern(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
@@ -524,6 +617,7 @@ def dynamic_atr_threshold(atr_ratio: float) -> float:
         return 0.0005
 
 def analyze(base: str, tf: str, manual=False) -> dict:
+    side = None
 
     if not in_trading_hours(7, 22, TZ):
         return {"skip": True, "reason": "Out of trading hours (07-22)"}
@@ -548,6 +642,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     compression = detect_compression(df)
     accumulation = detect_accumulation(df)
     volume_accum = detect_volume_accumulation(df)
+    absorption = detect_absorption(df)
+    momentum = detect_momentum_expansion(df)
+    vol_trend = detect_volume_trend(df)
+    vol_expand = detect_volatility_expansion(df)
 
     if compression:
         breakout = detect_breakout(df)
@@ -559,10 +657,17 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     grab = detect_liquidity_grab(df)
     order_block = detect_order_block(df)
     log.info(f"{base} SWEEP={sweep}")
-    whale = detect_whale_flow(symbol_usdt_perp(base))
-    vacuum = detect_liquidity_vacuum(symbol_usdt_perp(base))
+    symbol = symbol_usdt_perp(base)
+
+    orderbook = EX.fetch_order_book(symbol, limit=20)
+
+    whale = detect_whale_flow(orderbook)
+    vacuum = detect_liquidity_vacuum(orderbook)
+    pressure = detect_liquidity_pressure(orderbook)
 
     bos = detect_strong_bos(df)
+    true_break = detect_true_breakout(df)
+    
     if bos != "NO_BOS" and not strong_breakout_candle(df):
         return {"skip": True, "reason": "Weak breakout candle"}
 
@@ -570,7 +675,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         bos = detect_bos(df)
 
     # ===== nếu có breakout sớm thì dùng nó =====
-    if 'side' not in locals():
+    if side is None:
 
         if bos == "NO_BOS":
             return {"skip": True, "reason": "No market structure"}
@@ -585,10 +690,11 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     # ===== HTF TREND FILTER =====
     trend = get_htf_trend(base)
 
-    if side == "LONG" and trend != "UP":
+    # cho phép đảo chiều nếu có BOS mạnh
+    if side == "LONG" and trend != "UP" and bos != "BOS_UP":
         return {"skip": True, "reason": "Against HTF trend"}
 
-    if side == "SHORT" and trend != "DOWN":
+    if side == "SHORT" and trend != "DOWN" and bos != "BOS_DOWN":
         return {"skip": True, "reason": "Against HTF trend"}
     # EMA trend filter
     if side == "LONG" and row["close"] < row["ema50"]:
@@ -619,9 +725,32 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     score = 0
     pump_score = 0
     # ===== EARLY PUMP SIGNAL =====
+    if true_break:
+        score += 25
+        pump_score += 20
+    if absorption:
+        score += 25
+        pump_score += 20
+        
     if volume_accum:
         score += 30
         pump_score += 25
+        
+    if pressure == side:
+        score += 25
+        pump_score += 25
+        
+    if momentum:
+        score += 15
+        pump_score += 10
+
+    if vol_trend:
+        score += 15
+        pump_score += 15
+
+    if vol_expand:
+        score += 20
+        pump_score += 20
 
     if vacuum:
         score += 30
@@ -692,31 +821,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 # ================== Telegram ==================
 async def cmd_start(update, ctx):
     await update.message.reply_text(
-        "🤖 Bot AI Futures đã sẵn sàng!\n"
-        "• Gõ coin: btc hoặc sol 15m\n"
-        "• Bot tự động gửi tín hiệu mỗi 1h khi có sóng mạnh\n"
+         "🤖 Bot Futures AI đã chạy!\n"
+         "Bot tự động quét thị trường và gửi tín hiệu mạnh nhất."
     )
 
-async def handle_text(update, ctx):
-    text = (update.message.text or "").strip()
-    try:
-        base, tf = parse_symbol_tf(text, TIMEFRAME_DEFAULT)
-        r = analyze(base, tf, manual=True)
-
-        if r.get("skip"):
-            await update.message.reply_text(f"⏭️ Bỏ qua: {r['reason']}")
-            return
-
-        msg = (
-            f"📊 {r['base']} ({r['tf']})\n"
-            f"Hướng: {r['side']} | BOS: {r['bos']}\n"
-            f"Entry: {fmt(r['price'])}\n"
-            f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
-        )
-        await update.message.reply_text(msg)
-
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Lỗi phân tích: {e}")
 
 # ================== Auto scan ==================
 async def auto_scan(ctx):
@@ -751,7 +859,7 @@ async def auto_scan(ctx):
 
     sorted_coins = sorted(volumes, key=volumes.get, reverse=True)
 
-    top = sorted_coins[:40]
+    top = sorted_coins[:30]
 
     log.info(f"Scanning coins: {top}")
 
@@ -844,7 +952,6 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(on_error)
 
     if AUTO_SCAN:

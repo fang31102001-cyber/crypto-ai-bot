@@ -731,10 +731,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     ema12_slope = ema_slope(df["ema12"])
     ema26_slope = ema_slope(df["ema26"])
 
-    if side == "LONG" and ema12_slope <= 0:
+    if side == "LONG" and ema12_slope <= 0 and not pre_pump:
         return {"skip": True, "reason": "EMA slope weak"}
 
-    if side == "SHORT" and ema12_slope >= 0:
+    if side == "SHORT" and ema12_slope >= 0 and not pre_pump:
         return {"skip": True, "reason": "EMA slope weak"}
         
     # ===== HTF TREND FILTER =====
@@ -754,7 +754,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         return {"skip": True, "reason": "Above EMA50"}
     # ===== RETEST CONFIRM =====
     if not manual:
-        if not break_retest_ok(df, side):
+        if not break_retest_ok(df, side) and not pre_pump:
             return {"skip": True, "reason": "No retest"}
         
     # ===== COOLDOWN =====

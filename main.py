@@ -164,8 +164,8 @@ def strong_breakout_candle(df):
     return False
     
 def detect_true_breakout(df):
-    if not (pre_pump or true_break or volume_accum):
-        return {"skip": True, "reason": "No strong setup"}]
+
+    last = df.iloc[-1]
 
     body = abs(last["close"] - last["open"])
     rng = last["high"] - last["low"]
@@ -724,18 +724,23 @@ def dynamic_atr_threshold(atr_ratio: float) -> float:
         return 0.0005
 
 def analyze(base: str, tf: str, manual=False) -> dict:
+    
+    if not in_trading_hours(7, 22, TZ):
+        return {"skip": True, "reason": "Out of trading hours (07-22)"}
+
+    df = enrich(fetch_ohlcv(base, tf, limit=300))
     side = None
     early = detect_early_trend(df)
 
     if early:
         side = early
-
-    if not in_trading_hours(7, 22, TZ):
-        return {"skip": True, "reason": "Out of trading hours (07-22)"}
-
-    df = enrich(fetch_ohlcv(base, tf, limit=300))
-
+   
     row = df.iloc[-1].to_dict()
+    price_move = abs(df["close"].iloc[-1] - df["close"].iloc[-3]) / df["close"].iloc[-3]
+
+    # nếu giá đã chạy rồi → bỏ
+    if price_move > 0.03:
+        return {"skip": True, "reason": "Too late (price moved)"}
     last_bar = df["ts"].iloc[-1]
 
     if not manual and LAST_BAR_SIGNAL.get(base) == last_bar:
@@ -758,6 +763,9 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     vol_trend = detect_volume_trend(df)
     vol_expand = detect_volatility_expansion(df)
     pre_pump = detect_pre_pump(df)
+    if early:
+        if not (pre_pump or volume_accum or absorption):
+        return {"skip": True, "reason": "Early but no confirmation"}
     
     if compression:
         breakout = detect_breakout(df)
@@ -781,6 +789,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     bos = detect_strong_bos(df)
     true_break = detect_true_breakout(df)
+    
+    # nếu breakout rồi thì bỏ (đu giá)
+    if true_break and not pre_pump:
+        return {"skip": True, "reason": "Late breakout"}
     
     if bos != "NO_BOS" and not strong_breakout_candle(df):
         return {"skip": True, "reason": "Weak breakout candle"}

@@ -164,8 +164,8 @@ def strong_breakout_candle(df):
     return False
     
 def detect_true_breakout(df):
-
-    last = df.iloc[-1]
+    if not (pre_pump or true_break or volume_accum):
+        return {"skip": True, "reason": "No strong setup"}]
 
     body = abs(last["close"] - last["open"])
     rng = last["high"] - last["low"]
@@ -329,6 +329,76 @@ def detect_pre_pump(df):
         return True
 
     return False
+    
+def detect_fake_breakout(df):
+
+    if len(df) < 5:
+        return False
+
+    last = df.iloc[-1]
+
+    open_price = last["open"]
+    close_price = last["close"]
+    high = last["high"]
+    low = last["low"]
+
+    body = abs(close_price - open_price)
+    full_range = high - low
+
+    if full_range == 0:
+        return False
+
+    body_ratio = body / full_range
+
+    # volume
+    vol = last["volume"]
+    vol_ma = df["volume"].rolling(20).mean().iloc[-2]
+
+    # điều kiện trap:
+    # 1. râu dài (body nhỏ)
+    # 2. volume lớn bất thường
+    if body_ratio < 0.4 and vol > vol_ma * 1.5:
+        return True
+
+    return False
+    
+def detect_early_trend(df):
+
+    if len(df) < 30:
+        return None
+
+    recent = df.tail(10)
+
+    # EMA bắt đầu dốc
+    ema12_slope = df["ema12"].iloc[-1] - df["ema12"].iloc[-4]
+
+    # Volume tăng
+    vol_now = df["volume"].iloc[-1]
+    vol_prev = df["volume"].iloc[-5]
+
+    vol_up = vol_now > vol_prev * 1.2
+
+    # ATR mở rộng
+    atr_now = df["atr"].iloc[-1]
+    atr_prev = df["atr"].iloc[-5]
+
+    atr_up = atr_now > atr_prev * 1.15
+
+    # Giá chưa chạy nhiều (rất quan trọng)
+    move = abs(df["close"].iloc[-1] - df["close"].iloc[-5]) / df["close"].iloc[-5]
+
+    if move > 0.02:
+        return None
+
+    # LONG
+    if ema12_slope > 0 and vol_up and atr_up:
+        return "LONG"
+
+    # SHORT
+    if ema12_slope < 0 and vol_up and atr_up:
+        return "SHORT"
+
+    return None
     
 def detect_breakout(df):
 
@@ -655,6 +725,10 @@ def dynamic_atr_threshold(atr_ratio: float) -> float:
 
 def analyze(base: str, tf: str, manual=False) -> dict:
     side = None
+    early = detect_early_trend(df)
+
+    if early:
+        side = early
 
     if not in_trading_hours(7, 22, TZ):
         return {"skip": True, "reason": "Out of trading hours (07-22)"}
@@ -713,6 +787,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     if bos == "NO_BOS":
         bos = detect_bos(df)
+    fake = detect_fake_breakout(df)
+
+    if fake:
+        return {"skip": True, "reason": "Fake breakout trap"}
 
     # ===== nếu có breakout sớm thì dùng nó =====
     if side is None:
@@ -730,12 +808,6 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     ema12_slope = ema_slope(df["ema12"])
     ema26_slope = ema_slope(df["ema26"])
-
-    if side == "LONG" and ema12_slope <= 0 and not pre_pump:
-        return {"skip": True, "reason": "EMA slope weak"}
-
-    if side == "SHORT" and ema12_slope >= 0 and not pre_pump:
-        return {"skip": True, "reason": "EMA slope weak"}
         
     # ===== HTF TREND FILTER =====
     trend = get_htf_trend(base)
@@ -752,10 +824,6 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     if side == "SHORT" and row["close"] > row["ema50"]:
         return {"skip": True, "reason": "Above EMA50"}
-    # ===== RETEST CONFIRM =====
-    if not manual:
-        if not break_retest_ok(df, side) and not pre_pump:
-            return {"skip": True, "reason": "No retest"}
         
     # ===== COOLDOWN =====
     if not manual and not cooldown_ok(base, side):
@@ -845,7 +913,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     if 30 < row["rsi"] < 70:
         score += 10
 
-    if score < 50:
+    if score < 70:
         return {"skip": True, "reason": f"Low score {score}"}
     
         

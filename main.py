@@ -765,7 +765,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     pre_pump = detect_pre_pump(df)
     if early:
         if not (pre_pump or volume_accum or absorption):
-        return {"skip": True, "reason": "Early but no confirmation"}
+            return {"skip": True, "reason": "Early but no confirmation"}
     
     if compression:
         breakout = detect_breakout(df)

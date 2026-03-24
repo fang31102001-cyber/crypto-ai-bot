@@ -23,7 +23,7 @@ TZ                 = os.getenv("TZ", "Asia/Ho_Chi_Minh")
 TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
-SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "900"))
+SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "1800"))
 MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.1"))
 
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
@@ -31,12 +31,15 @@ QUOTE              = os.getenv("QUOTE", "USDT").upper()
 
 LABEL_TP_PCT       = float(os.getenv("LABEL_TP_PCT", "0.004"))
 LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
+MODE = "HYBRID"
+use_big_money = false
 
 CHAT_IDS = [
     5335165612,
     5895497001
 ]
 LAST_SIGNAL_TIME = {}
+ACTIVE_TRADES = {}
 LAST_BAR_SIGNAL = {}
 COOLDOWN_MINUTES = 30
 
@@ -301,7 +304,7 @@ def detect_volatility_expansion(df):
     price_move = abs(df["close"].iloc[-1] - df["close"].iloc[-5]) / df["close"].iloc[-5]
 
     # ATR đang mở rộng + volume tăng + giá chưa chạy nhiều
-    if atr_now > atr_prev * 1.25 and vol_now > vol_ma * 1.2 and price_move < 0.03:
+    if atr_now > atr_prev * 1.25 and vol_now > vol_ma * 1.2 and price_move < 0.02:
         return True
 
     return False
@@ -722,6 +725,108 @@ def dynamic_atr_threshold(atr_ratio: float) -> float:
 
     else:
         return 0.0005
+def detect_market_condition(df):
+
+    if len(df) < 50:
+        return "NORMAL"
+
+    atr_now = df["atr"].iloc[-1]
+    atr_avg = df["atr"].rolling(20).mean().iloc[-1]
+
+    vol_now = df["volume"].iloc[-1]
+    vol_avg = df["volume"].rolling(20).mean().iloc[-1]
+
+    ema12 = df["ema12"].iloc[-1]
+    ema26 = df["ema26"].iloc[-1]
+
+    trend_strength = abs(ema12 - ema26) / df["close"].iloc[-1]
+
+    if atr_now > atr_avg * 1.2 and vol_now > vol_avg * 1.2 and trend_strength > 0.003:
+        return "STRONG"
+
+    return "WEAK"
+
+
+def detect_big_money_flow(df):
+
+    if len(df) < 50:
+        return False
+
+    recent = df.tail(30)
+
+    vol_old = recent["volume"].iloc[:15].mean()
+    vol_new = recent["volume"].iloc[15:].mean()
+
+    vol_increase = vol_new > vol_old * 1.4
+
+    high = recent["high"].max()
+    low = recent["low"].min()
+
+    price_range = (high - low) / low
+
+    atr_now = df["atr"].iloc[-1]
+    price = df["close"].iloc[-1]
+
+    atr_ratio = atr_now / price
+
+    if vol_increase and price_range < 0.05 and atr_ratio < 0.008:
+        return True
+
+    return False
+    
+def detect_smart_money(df):
+
+    if len(df) < 50:
+        return False
+
+    recent = df.tail(30)
+
+    # volume tăng mạnh nhưng giá đi ngang
+    vol_old = recent["volume"].iloc[:15].mean()
+    vol_new = recent["volume"].iloc[15:].mean()
+
+    vol_up = vol_new > vol_old * 1.5
+
+    # giá bị nén cực mạnh
+    high = recent["high"].max()
+    low = recent["low"].min()
+
+    range_ratio = (high - low) / low
+
+    # ATR cực thấp
+    atr_ratio = df["atr"].iloc[-1] / df["close"].iloc[-1]
+
+    if vol_up and range_ratio < 0.03 and atr_ratio < 0.007:
+        return True
+
+    return False
+
+def manage_trailing(base, df):
+
+    if base not in ACTIVE_TRADES:
+        return None
+
+    trade = ACTIVE_TRADES[base]
+    side = trade["side"]
+    entry = trade["entry"]
+
+    price = df["close"].iloc[-1]
+    atrv = df["atr"].iloc[-1]
+
+    profit = abs(price - entry)
+
+    # lời nhẹ → về hòa vốn
+    if profit > 2 * atrv:
+        trade["sl"] = entry
+
+    # lời mạnh → khóa lợi nhuận
+    if profit > 3 * atrv:
+        if side == "LONG":
+            trade["sl"] = price - atrv
+        else:
+            trade["sl"] = price + atrv
+
+    return trade
 
 def analyze(base: str, tf: str, manual=False) -> dict:
     
@@ -729,8 +834,16 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         return {"skip": True, "reason": "Out of trading hours (07-22)"}
 
     df = enrich(fetch_ohlcv(base, tf, limit=300))
+    market = detect_market_condition(df)
     side = None
     early = detect_early_trend(df)
+
+    if MODE == "SNIPER":
+        if not early:
+            return {"skip": True, "reason": "Not sniper"}
+
+    if MODE == "SWING":
+        early = None
 
     if early:
         side = early
@@ -738,13 +851,14 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     row = df.iloc[-1].to_dict()
     price_move = abs(df["close"].iloc[-1] - df["close"].iloc[-3]) / df["close"].iloc[-3]
 
-    # nếu giá đã chạy rồi → bỏ
     if price_move > 0.03:
-        return {"skip": True, "reason": "Too late (price moved)"}
+        return {"skip": True, "reason": "Too late"}
+
     last_bar = df["ts"].iloc[-1]
 
     if not manual and LAST_BAR_SIGNAL.get(base) == last_bar:
         return {"skip": True, "reason": "Duplicate candle"}
+        
 
     # ===== ATR FILTER =====
     atr_ratio = row["atr"] / row["close"]
@@ -763,6 +877,12 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     vol_trend = detect_volume_trend(df)
     vol_expand = detect_volatility_expansion(df)
     pre_pump = detect_pre_pump(df)
+    big_money = detect_big_money_flow(df)
+    smart_money = detect_smart_money(df)
+    # ===== FILTER DÒNG TIỀN (BẮT BUỘC) =====
+    if use_big_money:
+        if not (pre_pump or big_money or smart_money):
+            return {"skip": True, "reason": "No real money flow"}
     if early:
         if not (pre_pump or volume_accum or absorption):
             return {"skip": True, "reason": "Early but no confirmation"}
@@ -823,6 +943,13 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         
     # ===== HTF TREND FILTER =====
     trend = get_htf_trend(base)
+    # ===== SWING FILTER (BẮT BUỘC) =====
+    if MODE == "SWING":
+        if side == "LONG" and trend != "UP":
+            return {"skip": True, "reason": "Not swing uptrend"}
+
+        if side == "SHORT" and trend != "DOWN":
+            return {"skip": True, "reason": "Not swing downtrend"}
 
     # cho phép đảo chiều nếu có BOS mạnh
     if side == "LONG" and trend != "UP" and bos != "BOS_UP":
@@ -856,9 +983,13 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     pump_score = 0
     # ===== EARLY PUMP SIGNAL =====
     if pre_pump:
-        score += 25
-        pump_score += 30
+        score += 35
+        pump_score += 40
         
+    if smart_money:
+        score += 40
+        pump_score += 50  
+    
     if true_break:
         score += 25
         pump_score += 20
@@ -924,22 +1055,45 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     if 30 < row["rsi"] < 70:
         score += 10
+    if use_big_money:
+        if score < 75:
+            return {"skip": True, "reason": f"Weak market {score}"}
+    else:
+        if MODE == "SNIPER" and score < 65:
+            return {"skip": True, "reason": f"Low sniper {score}"}
 
-    if score < 70:
-        return {"skip": True, "reason": f"Low score {score}"}
-    
+        if MODE == "SWING" and score < 80:
+            return {"skip": True, "reason": f"Low swing {score}"}
+
+        if MODE == "HYBRID" and score < 70:
+            return {"skip": True, "reason": f"Low hybrid {score}"}
         
     log.info(f"SIGNAL {base} {side} SCORE={score} PUMP={pump_score} BOS={bos}")
     
     # 3. TP / SL theo ATR
     entry = float(row["close"])
     atrv = float(row["atr"])
-    tp = entry + (2.5 * atrv if side == "LONG" else -2.5 * atrv)
-    sl = entry - (1.2 * atrv if side == "LONG" else -1.2 * atrv)
 
+    if MODE == "SNIPER":
+        tp = entry + (2.0 * atrv if side == "LONG" else -2.0 * atrv)
+        sl = entry - (1.0 * atrv if side == "LONG" else -1.0 * atrv)
+
+    elif MODE == "SWING":
+        tp = entry + (4.0 * atrv if side == "LONG" else -4.0 * atrv)
+        sl = entry - (1.8 * atrv if side == "LONG" else -1.8 * atrv)
+
+    else:  # HYBRID
+        tp = entry + (3.0 * atrv if side == "LONG" else -3.0 * atrv)
+        sl = entry - (1.3 * atrv if side == "LONG" else -1.3 * atrv)
+        
     LAST_SIGNAL_TIME[f"{base}_{side}"] = time.time()
     LAST_BAR_SIGNAL[base] = df["ts"].iloc[-1]
-
+    ACTIVE_TRADES[base] = {
+        "side": side,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp
+    }
     return {
         "base": base.upper(),
         "tf": tf,
@@ -1002,6 +1156,13 @@ async def auto_scan(ctx):
     random.shuffle(top)
 
     for coin in top:
+        
+        df = enrich(fetch_ohlcv(coin, TIMEFRAME_DEFAULT, 100))
+        manage_trailing(coin, df)
+        if trade:
+            msg = f"📈 Trailing update {coin}\nSL mới: {fmt(trade['sl'])}"
+            for cid in chat_ids:
+                await ctx.application.bot.send_message(chat_id=cid, text=msg)
 
         try:
 
@@ -1019,30 +1180,21 @@ async def auto_scan(ctx):
     if not signals:
         return
 
-    # sắp xếp tín hiệu theo winrate
-    signals = sorted(
-        signals,
-        key=lambda x: x["pump_score"],
-        reverse=True
+    # chọn duy nhất 1 tín hiệu mạnh nhất
+    best = max(signals, key=lambda x: x["pump_score"])
+
+    msg = (
+        f"🚀 TOP 1 SIGNAL — {best['base']}/USDT ({best['tf']})\n"
+        f"Hướng: {best['side']} | BOS: {best['bos']}\n"
+        f"Entry: {fmt(best['price'])}\n"
+        f"TP: {fmt(best['tp'])} | SL: {fmt(best['sl'])}\n"
     )
 
-    # chỉ gửi 3 tín hiệu mạnh nhất
-    signals = signals[:3]
-
-    for r in signals:
-
-        msg = (
-            f"🔥 Tín hiệu mạnh — {r['base']}/USDT ({r['tf']})\n"
-            f"Hướng: {r['side']} | BOS: {r['bos']}\n"
-            f"Entry: {fmt(r['price'])}\n"
-            f"TP: {fmt(r['tp'])} | SL: {fmt(r['sl'])}\n"
+    for cid in chat_ids:
+        await ctx.application.bot.send_message(
+            chat_id=cid,
+            text=msg
         )
-
-        for cid in chat_ids:
-            await ctx.application.bot.send_message(
-                chat_id=cid,
-                text=msg
-            )
 
 # ================== Run ==================
 def _seconds_to_next_hour(tz_name: str) -> int:

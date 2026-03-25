@@ -32,7 +32,7 @@ QUOTE              = os.getenv("QUOTE", "USDT").upper()
 LABEL_TP_PCT       = float(os.getenv("LABEL_TP_PCT", "0.004"))
 LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 MODE = "HYBRID"
-use_big_money = false
+use_big_money = False
 
 CHAT_IDS = [
     5335165612,
@@ -1055,9 +1055,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
 
     if 30 < row["rsi"] < 70:
         score += 10
-    if use_big_money:
-        if score < 75:
-            return {"skip": True, "reason": f"Weak market {score}"}
+   
     else:
         if MODE == "SNIPER" and score < 65:
             return {"skip": True, "reason": f"Low sniper {score}"}
@@ -1158,12 +1156,13 @@ async def auto_scan(ctx):
     for coin in top:
         
         df = enrich(fetch_ohlcv(coin, TIMEFRAME_DEFAULT, 100))
-        manage_trailing(coin, df)
+        trade = manage_trailing(coin, df)
+
         if trade:
             msg = f"📈 Trailing update {coin}\nSL mới: {fmt(trade['sl'])}"
             for cid in chat_ids:
                 await ctx.application.bot.send_message(chat_id=cid, text=msg)
-
+                
         try:
 
             r = analyze(coin, TIMEFRAME_DEFAULT, manual=False)

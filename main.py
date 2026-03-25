@@ -481,6 +481,36 @@ def break_retest_ok(df: pd.DataFrame, side: str, lookback: int = 15, tol: float 
         return near or wick
 
     return False
+    
+def confirm_entry_pro(df, side):
+
+    if len(df) < 20:
+        return False
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # ===== pullback =====
+    if side == "LONG":
+        pullback = last["low"] <= df["ema12"].iloc[-1]
+        confirm = last["close"] > prev["high"]
+    else:
+        pullback = last["high"] >= df["ema12"].iloc[-1]
+        confirm = last["close"] < prev["low"]
+
+    # ===== volume =====
+    vol_ok = last["volume"] > df["volume"].rolling(20).mean().iloc[-2]
+
+    # ===== RSI =====
+    rsi = df["rsi"].iloc[-1]
+
+    if side == "LONG":
+        rsi_ok = 45 < rsi < 70
+    else:
+        rsi_ok = 30 < rsi < 55
+
+    return pullback and confirm and vol_ok and rsi_ok
+    
 def detect_strong_bos(df: pd.DataFrame, lookback: int = 12) -> str:
     if len(df) < lookback + 2:
         return "NO_BOS"
@@ -825,11 +855,11 @@ def manage_trailing(base, df):
     profit = abs(price - entry)
 
     # hòa vốn
-    if profit > 2 * atrv:
+    if profit > 3 * atrv:
         trade["sl"] = entry
 
     # khóa lợi nhuận
-    if profit > 3 * atrv:
+    if profit > 5 * atrv:
         if side == "LONG":
             trade["sl"] = price - atrv
         else:
@@ -944,6 +974,10 @@ def analyze(base: str, tf: str, manual=False) -> dict:
             return {"skip": True, "reason": "No market structure"}
 
         side = "LONG" if bos == "BOS_UP" else "SHORT"
+        
+    if not confirm_entry_pro(df, side):
+        return {"skip": True, "reason": "Bad entry timing"}
+    
     # Trend continuation filter
     if side == "LONG" and row["ema12"] < row["ema26"]:
         return {"skip": True, "reason": "Weak bullish momentum"}

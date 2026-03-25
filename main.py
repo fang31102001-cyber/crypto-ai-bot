@@ -32,7 +32,7 @@ QUOTE              = os.getenv("QUOTE", "USDT").upper()
 LABEL_TP_PCT       = float(os.getenv("LABEL_TP_PCT", "0.004"))
 LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 MODE = "HYBRID"
-use_big_money = False
+use_big_money = True
 
 CHAT_IDS = [
     5335165612,
@@ -1101,17 +1101,17 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         score += 20
 
     if 30 < row["rsi"] < 70:
-        score += 10
-   
-    else:
-        if MODE == "SNIPER" and score < 65:
-            return {"skip": True, "reason": f"Low sniper {score}"}
+    score += 10
 
-        if MODE == "SWING" and score < 80:
-            return {"skip": True, "reason": f"Low swing {score}"}
+    # ===== FILTER CUỐI =====
+    if MODE == "SNIPER" and score < 65:
+        return {"skip": True, "reason": f"Low sniper {score}"}
 
-        if MODE == "HYBRID" and score < 70:
-            return {"skip": True, "reason": f"Low hybrid {score}"}
+    if MODE == "SWING" and score < 80:
+        return {"skip": True, "reason": f"Low swing {score}"}
+
+    if MODE == "HYBRID" and score < 70:
+        return {"skip": True, "reason": f"Low hybrid {score}"}
         
     log.info(f"SIGNAL {base} {side} SCORE={score} PUMP={pump_score} BOS={bos}")
     

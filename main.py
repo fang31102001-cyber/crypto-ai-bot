@@ -60,11 +60,18 @@ def start_keep_alive():
 # ================== Helpers ==================
 VALID_TF = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","12h","1d"}
 
-def fmt(x, nd=6):
+def fmt(x):
     try:
-        return f"{float(x):.{nd}f}"
-    except Exception:
+        x = float(x)
+        if x < 0.001:
+            return f"{x:.8f}"
+        elif x < 1:
+            return f"{x:.6f}"
+        else:
+            return f"{x:.4f}"
+    except:
         return str(x)
+        
 def cooldown_ok(symbol: str, side: str) -> bool:
     key = f"{symbol}_{side}"
     now = time.time()
@@ -810,23 +817,29 @@ def manage_trailing(base, df):
     side = trade["side"]
     entry = trade["entry"]
 
+    old_sl = trade["sl"]
+
     price = df["close"].iloc[-1]
     atrv = df["atr"].iloc[-1]
 
     profit = abs(price - entry)
 
-    # lời nhẹ → về hòa vốn
+    # hòa vốn
     if profit > 2 * atrv:
         trade["sl"] = entry
 
-    # lời mạnh → khóa lợi nhuận
+    # khóa lợi nhuận
     if profit > 3 * atrv:
         if side == "LONG":
             trade["sl"] = price - atrv
         else:
             trade["sl"] = price + atrv
 
-    return trade
+    # ❗ CHỈ gửi nếu SL thay đổi
+    if trade["sl"] != old_sl:
+        return trade
+
+    return None
 
 def analyze(base: str, tf: str, manual=False) -> dict:
     

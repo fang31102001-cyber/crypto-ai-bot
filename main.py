@@ -873,9 +873,6 @@ def manage_trailing(base, df):
 
 def analyze(base: str, tf: str, manual=False) -> dict:
     
-    if not in_trading_hours(7, 22, TZ):
-        return {"skip": True, "reason": "Out of trading hours (07-22)"}
-
     df = enrich(fetch_ohlcv(base, tf, limit=300))
     market = detect_market_condition(df)
     side = None
@@ -1101,7 +1098,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         score += 20
 
     if 30 < row["rsi"] < 70:
-    score += 10
+        score += 10
 
     # ===== FILTER CUỐI =====
     if MODE == "SNIPER" and score < 65:
@@ -1161,9 +1158,6 @@ async def cmd_start(update, ctx):
 
 # ================== Auto scan ==================
 async def auto_scan(ctx):
-
-    if not in_trading_hours(7, 22, TZ):
-        return
 
     chat_ids = ctx.job.data["chat_ids"]
 

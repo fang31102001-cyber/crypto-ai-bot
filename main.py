@@ -23,7 +23,7 @@ TZ                 = os.getenv("TZ", "Asia/Ho_Chi_Minh")
 TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
-SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "1800"))
+SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "300"))
 MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.1"))
 
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
@@ -899,6 +899,12 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
 
     last_bar = df["ts"].iloc[-1]
 
+    now = pd.Timestamp.utcnow()
+
+    # chỉ cho trade khi nến gần đóng
+    if (now - last_bar).total_seconds() < 600:
+        return {"skip": True, "reason": "Candle not mature"}
+
     if str(LAST_BAR_SIGNAL.get(base)) == str(last_bar):
         return {"skip": True, "reason": "Duplicate candle"}
         
@@ -975,13 +981,25 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
     # ===== nếu có breakout sớm thì dùng nó =====
     if side is None:
 
-        if bos == "NO_BOS":
-            return {"skip": True, "reason": "No market structure"}
+        # 🚀 EARLY ENTRY
+        if pre_pump or volume_accum or absorption:
 
-        side = "LONG" if bos == "BOS_UP" else "SHORT"
+            if df["ema12"].iloc[-1] > df["ema26"].iloc[-1]:
+                side = "LONG"
+            else:
+                side = "SHORT"
+
+        else:
+            if bos == "NO_BOS":
+                return {"skip": True, "reason": "No market structure"}
+
+            side = "LONG" if bos == "BOS_UP" else "SHORT"
         
     if not confirm_entry_pro(df, side):
-        return {"skip": True, "reason": "Bad entry timing"}
+
+        # 🚀 cho phép early entry
+        if not (pre_pump or volume_accum or absorption):
+            return {"skip": True, "reason": "Bad entry timing"}
     
     # Trend continuation filter
     if side == "LONG" and row["ema12"] < row["ema26"]:

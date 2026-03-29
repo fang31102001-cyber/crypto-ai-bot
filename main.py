@@ -33,6 +33,7 @@ LABEL_TP_PCT       = float(os.getenv("LABEL_TP_PCT", "0.004"))
 LABEL_SL_PCT       = float(os.getenv("LABEL_SL_PCT", "0.004"))
 MODE = "HYBRID"
 use_big_money = True
+LAST_GLOBAL_SIGNAL = 0
 
 CHAT_IDS = [
     5335165612,
@@ -502,12 +503,12 @@ def confirm_entry_pro(df, side):
     vol_ok = last["volume"] > df["volume"].rolling(20).mean().iloc[-2]
 
     # ===== RSI =====
-    rsi = df["rsi"].iloc[-1]
+    rsi_val = df["rsi"].iloc[-1]
 
     if side == "LONG":
-        rsi_ok = 45 < rsi < 70
+        rsi_ok = 45 < rsi_val < 70
     else:
-        rsi_ok = 30 < rsi < 55
+        rsi_ok = 30 < rsi_val < 55
 
     return pullback and confirm and vol_ok and rsi_ok
     
@@ -871,9 +872,11 @@ def manage_trailing(base, df):
 
     return None
 
-def analyze(base: str, tf: str, manual=False) -> dict:
-    
-    df = enrich(fetch_ohlcv(base, tf, limit=300))
+def analyze(base: str, tf: str, df=None, manual=False) -> dict:
+
+    if df is None:
+        df = enrich(fetch_ohlcv(base, tf, limit=300))
+        
     market = detect_market_condition(df)
     side = None
     early = detect_early_trend(df)
@@ -891,12 +894,12 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     row = df.iloc[-1].to_dict()
     price_move = abs(df["close"].iloc[-1] - df["close"].iloc[-3]) / df["close"].iloc[-3]
 
-    if price_move > 0.03:
+    if price_move > 0.06:
         return {"skip": True, "reason": "Too late"}
 
     last_bar = df["ts"].iloc[-1]
 
-    if not manual and LAST_BAR_SIGNAL.get(base) == last_bar:
+    if str(LAST_BAR_SIGNAL.get(base)) == str(last_bar):
         return {"skip": True, "reason": "Duplicate candle"}
         
 
@@ -921,7 +924,7 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     smart_money = detect_smart_money(df)
     # ===== FILTER DÒNG TIỀN (BẮT BUỘC) =====
     if use_big_money:
-        if not (pre_pump or big_money or smart_money):
+        if not (pre_pump or big_money or smart_money or volume_accum or absorption):
             return {"skip": True, "reason": "No real money flow"}
     if early:
         if not (pre_pump or volume_accum or absorption):
@@ -939,10 +942,18 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     log.info(f"{base} SWEEP={sweep}")
     symbol = symbol_usdt_perp(base)
 
+    orderbook = {"bids": [], "asks": []}
+
     try:
-        orderbook = EX.fetch_order_book(symbol, limit=20)
-    except Exception:
-        orderbook = {"bids": [], "asks": []}
+        orderbook = EX.fetch_order_book(symbol, limit=10)
+    except:
+        pass
+    if orderbook["bids"] and orderbook["asks"]:
+
+        spread = (orderbook["asks"][0][0] - orderbook["bids"][0][0]) / orderbook["bids"][0][0]
+
+        if spread > 0.002:
+            return {"skip": True, "reason": "Spread too high"}
     whale = detect_whale_flow(orderbook)
     vacuum = detect_liquidity_vacuum(orderbook)
     pressure = detect_liquidity_pressure(orderbook)
@@ -953,9 +964,6 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     # nếu breakout rồi thì bỏ (đu giá)
     if true_break and not pre_pump:
         return {"skip": True, "reason": "Late breakout"}
-    
-    if bos != "NO_BOS" and not strong_breakout_candle(df):
-        return {"skip": True, "reason": "Weak breakout candle"}
 
     if bos == "NO_BOS":
         bos = detect_bos(df)
@@ -1025,6 +1033,9 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     # ===== SIGNAL SCORE =====
     score = 0
     pump_score = 0
+    
+    if bos != "NO_BOS" and not strong_breakout_candle(df):
+        score -= 10
     # ===== EARLY PUMP SIGNAL =====
     if pre_pump:
         score += 35
@@ -1107,8 +1118,15 @@ def analyze(base: str, tf: str, manual=False) -> dict:
     if MODE == "SWING" and score < 80:
         return {"skip": True, "reason": f"Low swing {score}"}
 
-    if MODE == "HYBRID" and score < 70:
-        return {"skip": True, "reason": f"Low hybrid {score}"}
+    if MODE == "HYBRID":
+
+        # market yếu -> siết mạnh
+        if market == "WEAK" and score < 85:
+            return {"skip": True, "reason": f"Weak market {score}"}
+
+        # market mạnh -> giữ như cũ
+        if market == "STRONG" and score < 70:
+            return {"skip": True, "reason": f"Low hybrid {score}"}
         
     log.info(f"SIGNAL {base} {side} SCORE={score} PUMP={pump_score} BOS={bos}")
     
@@ -1125,8 +1143,12 @@ def analyze(base: str, tf: str, manual=False) -> dict:
         sl = entry - (1.8 * atrv if side == "LONG" else -1.8 * atrv)
 
     else:  # HYBRID
-        tp = entry + (3.0 * atrv if side == "LONG" else -3.0 * atrv)
-        sl = entry - (1.3 * atrv if side == "LONG" else -1.3 * atrv)
+        if side == "LONG":
+            tp = entry + 3.0 * atrv
+            sl = entry - 1.3 * atrv
+        else:
+            tp = entry - 3.0 * atrv
+            sl = entry + 1.3 * atrv
         
     LAST_SIGNAL_TIME[f"{base}_{side}"] = time.time()
     LAST_BAR_SIGNAL[base] = df["ts"].iloc[-1]
@@ -1186,17 +1208,27 @@ async def auto_scan(ctx):
 
     sorted_coins = sorted(volumes, key=volumes.get, reverse=True)
 
-    top = sorted_coins[:30]
+    top = sorted_coins[:15]
 
     log.info(f"Scanning coins: {top}")
 
     signals = []
 
-    random.shuffle(top)
 
     for coin in top:
         
-        df = enrich(fetch_ohlcv(coin, TIMEFRAME_DEFAULT, 100))
+        try:
+            df = enrich(fetch_ohlcv(coin, TIMEFRAME_DEFAULT, 100))
+        except Exception as e:
+            log.warning(f"{coin} fetch error: {e}")
+            continue
+
+        try:
+            r = analyze(coin, TIMEFRAME_DEFAULT, df=df, manual=False)
+        except Exception as e:
+            log.warning(f"{coin} analyze error: {e}")
+            continue
+            
         trade = manage_trailing(coin, df)
 
         if trade:
@@ -1205,8 +1237,6 @@ async def auto_scan(ctx):
                 await ctx.application.bot.send_message(chat_id=cid, text=msg)
                 
         try:
-
-            r = analyze(coin, TIMEFRAME_DEFAULT, manual=False)
 
             if r.get("skip"):
                 log.info(f"{coin} skip: {r['reason']}")
@@ -1217,9 +1247,16 @@ async def auto_scan(ctx):
         except Exception as e:
             log.warning("scan fail %s: %r", coin, e)
 
+    global LAST_GLOBAL_SIGNAL
+
     if not signals:
         return
 
+    if time.time() - LAST_GLOBAL_SIGNAL < 600:
+        return
+
+    LAST_GLOBAL_SIGNAL = time.time()
+    
     # chọn duy nhất 1 tín hiệu mạnh nhất
     best = max(signals, key=lambda x: x["pump_score"])
 

@@ -866,8 +866,8 @@ def manage_trailing(base, df):
         else:
             trade["sl"] = price + atrv
 
-    # ❗ CHỈ gửi nếu SL thay đổi
-    if trade["sl"] != old_sl:
+    # chỉ update khi SL thay đổi đủ lớn
+    if abs(trade["sl"] - old_sl) / old_sl > 0.003:
         return trade
 
     return None
@@ -982,7 +982,7 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
     if side is None:
 
         # 🚀 EARLY ENTRY
-        if pre_pump or volume_accum or absorption:
+        if (pre_pump or volume_accum or absorption) and momentum:
 
             if df["ema12"].iloc[-1] > df["ema26"].iloc[-1]:
                 side = "LONG"
@@ -997,8 +997,8 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
         
     if not confirm_entry_pro(df, side):
 
-        # 🚀 cho phép early entry
-        if not (pre_pump or volume_accum or absorption):
+        # chỉ cho early khi cực mạnh
+        if not (pre_pump and smart_money):
             return {"skip": True, "reason": "Bad entry timing"}
     
     # Trend continuation filter
@@ -1021,12 +1021,13 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
         if side == "SHORT" and trend != "DOWN":
             return {"skip": True, "reason": "Not swing downtrend"}
 
-    # cho phép đảo chiều nếu có BOS mạnh
-    if side == "LONG" and trend != "UP" and bos != "BOS_UP":
+    # 🚀 CHẶN NGƯỢC TREND TUYỆT ĐỐI
+    if side == "LONG" and trend != "UP":
         return {"skip": True, "reason": "Against HTF trend"}
 
-    if side == "SHORT" and trend != "DOWN" and bos != "BOS_DOWN":
+    if side == "SHORT" and trend != "DOWN":
         return {"skip": True, "reason": "Against HTF trend"}
+        
     # EMA trend filter
     if side == "LONG" and row["close"] < row["ema50"]:
         return {"skip": True, "reason": "Below EMA50"}

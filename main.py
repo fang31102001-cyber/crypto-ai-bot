@@ -1250,11 +1250,6 @@ async def auto_scan(ctx):
             
         trade = manage_trailing(coin, df)
 
-        if trade:
-            msg = f"📈 Trailing update {coin}\nSL mới: {fmt(trade['sl'])}"
-            for cid in chat_ids:
-                await ctx.application.bot.send_message(chat_id=cid, text=msg)
-                
         try:
 
             if r.get("skip"):

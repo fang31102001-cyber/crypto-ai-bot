@@ -23,7 +23,7 @@ TZ                 = os.getenv("TZ", "Asia/Ho_Chi_Minh")
 TIMEFRAME_DEFAULT  = os.getenv("TIMEFRAME", "15m")
 
 AUTO_SCAN          = os.getenv("AUTO_SCAN", "true").lower() == "true"
-SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "300"))
+SCAN_INTERVAL_SEC  = int(os.getenv("SCAN_INTERVAL_SEC", "60"))
 MIN_VOLZ           = float(os.getenv("MIN_VOLZ", "0.1"))
 
 MARKET_TYPE        = os.getenv("MARKET_TYPE", "swap")
@@ -902,11 +902,15 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
     now = pd.Timestamp.utcnow()
 
     # chỉ cho trade khi nến gần đóng
-    if (now - last_bar).total_seconds() < 600:
+    if (now - last_bar).total_seconds() < 300:
         return {"skip": True, "reason": "Candle not mature"}
 
-    if str(LAST_BAR_SIGNAL.get(base)) == str(last_bar):
-        return {"skip": True, "reason": "Duplicate candle"}
+    last_bar = df["ts"].iloc[-1]
+
+    # chỉ trade khi có nến mới
+    if base in LAST_BAR_SIGNAL:
+        if str(LAST_BAR_SIGNAL[base]) == str(last_bar):
+            return {"skip": True, "reason": "Same candle"}
         
 
     # ===== ATR FILTER =====
@@ -930,8 +934,9 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
     smart_money = detect_smart_money(df)
     # ===== FILTER DÒNG TIỀN (BẮT BUỘC) =====
     if use_big_money:
-        if not (pre_pump or big_money or smart_money or volume_accum or absorption):
+        if not (pre_pump or volume_accum or absorption):
             return {"skip": True, "reason": "No real money flow"}
+            
     if early:
         if not (pre_pump or volume_accum or absorption):
             return {"skip": True, "reason": "Early but no confirmation"}
@@ -997,8 +1002,7 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
         
     if not confirm_entry_pro(df, side):
 
-        # chỉ cho early khi cực mạnh
-        if not (pre_pump and smart_money):
+        if not (pre_pump or volume_accum):
             return {"skip": True, "reason": "Bad entry timing"}
     
     # Trend continuation filter
@@ -1015,11 +1019,11 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
     trend = get_htf_trend(base)
     # ===== SWING FILTER (BẮT BUỘC) =====
     if MODE == "SWING":
-        if side == "LONG" and trend != "UP":
-            return {"skip": True, "reason": "Not swing uptrend"}
+        if side == "LONG" and trend == "DOWN":
+            return {"skip": True, "reason": "Against HTF trend"}
 
-        if side == "SHORT" and trend != "DOWN":
-            return {"skip": True, "reason": "Not swing downtrend"}
+        if side == "SHORT" and trend == "UP":
+            return {"skip": True, "reason": "Against HTF trend"}
 
     # 🚀 CHẶN NGƯỢC TREND TUYỆT ĐỐI
     if side == "LONG" and trend != "UP":
@@ -1139,11 +1143,9 @@ def analyze(base: str, tf: str, df=None, manual=False) -> dict:
 
     if MODE == "HYBRID":
 
-        # market yếu -> siết mạnh
-        if market == "WEAK" and score < 85:
+        if market == "WEAK" and score < 80:
             return {"skip": True, "reason": f"Weak market {score}"}
 
-        # market mạnh -> giữ như cũ
         if market == "STRONG" and score < 70:
             return {"skip": True, "reason": f"Low hybrid {score}"}
         
